@@ -44,11 +44,15 @@
 </tr>
 <tr>
 <td>분석 대상</td>
-<td><code>examples/mock-shop/</code> (React 18 + React Router 6, 파일 7개)</td>
+<td><code>examples/mock-shop/</code> (React 18 + React Router 6, 파일 6개)</td>
 </tr>
 <tr>
 <td>도메인</td>
 <td>e-commerce (스토어프론트) — <code>package.json.description</code> "Minimal storefront with auth, cart and checkout" 근거</td>
+</tr>
+<tr>
+<td>분석 범위 한계</td>
+<td>라우터가 참조하는 화면 컴포넌트는 8개지만, <strong>소스가 포함된 건 Login·Cart·Checkout 3개뿐</strong>. Home·ProductList·ProductDetail·Orders·AdminDashboard는 라우팅에서 import만 확인되어 화면 내부 동작은 <code>[정보 없음 — 별도 확인 필요]</code></td>
 </tr>
 </tbody>
 </table>
@@ -136,8 +140,8 @@
 <tr>
 <td>US-1</td>
 <td>방문자로서, 로그인 없이 상품을 둘러보고 싶다</td>
-<td>ProductList, ProductDetail</td>
-<td>가드 없는 라우트</td>
+<td>ProductList, ProductDetail <code>[정보 없음]</code></td>
+<td>가드 없는 라우트 (단, 두 컴포넌트 소스 미포함 → 화면 내부 동작 미확인)</td>
 </tr>
 <tr>
 <td>US-2</td>
@@ -160,8 +164,8 @@
 <tr>
 <td>US-5</td>
 <td>관리자로서, 일반 사용자는 못 보는 대시보드에 접근하고 싶다</td>
-<td>AdminDashboard</td>
-<td><code>role="admin"</code> 가드</td>
+<td>AdminDashboard <code>[정보 없음]</code></td>
+<td><code>role="admin"</code> 가드 (대시보드 내용은 소스 미포함)</td>
 </tr>
 </tbody>
 </table>
@@ -375,13 +379,19 @@
 </tbody>
 </table>
 <h2 id="12-appendix">12. Appendix (부록)</h2>
-<p><strong>12.1 주요 컴포넌트</strong>: Home, Login, ProductList, ProductDetail, Cart, Checkout, Orders, AdminDashboard, RequireAuth</p>
+<p><strong>12.1 주요 컴포넌트</strong></p>
+<ul>
+<li>소스 분석됨: <code>Login</code>, <code>Cart</code>, <code>Checkout</code>, <code>RequireAuth</code>, <code>router</code></li>
+<li>라우팅에서 참조만 확인 (내부 <code>[정보 없음]</code>): <code>Home</code>, <code>ProductList</code>, <code>ProductDetail</code>, <code>Orders</code>, <code>AdminDashboard</code></li>
+</ul>
 <p><strong>12.2 용어 정의</strong>: <code>RequireAuth</code>(인증 가드), <code>grandTotal</code>(배송비 포함 결제금액), <code>FREE_SHIPPING_THRESHOLD</code>(무료배송 기준액 50,000)</p>
-<p><strong>12.3 QA 체크리스트</strong>:
-- [ ] 미로그인 상태로 <code>/checkout</code> 직접 진입 시 로그인 리다이렉트되는가
-- [ ] 로그인 후 원래 경로(<code>from</code>)로 복귀하는가
-- [ ] user 계정으로 <code>/admin</code> 접근 시 홈으로 차단되는가
-- [ ] 합계 49,999원/50,000원 경계에서 배송비가 올바른가
-- [ ] 빈 장바구니에서 결제 버튼이 비활성인가</p>
+<p><strong>12.3 QA 체크리스트</strong></p>
+<ul>
+<li>[ ] 미로그인 상태로 <code>/checkout</code> 직접 진입 시 로그인 리다이렉트되는가</li>
+<li>[ ] 로그인 후 원래 경로(<code>from</code>)로 복귀하는가</li>
+<li>[ ] user 계정으로 <code>/admin</code> 접근 시 홈으로 차단되는가</li>
+<li>[ ] 합계 49,999원/50,000원 경계에서 배송비가 올바른가</li>
+<li>[ ] 빈 장바구니에서 결제 버튼이 비활성인가</li>
+</ul>
 </body>
 </html>
