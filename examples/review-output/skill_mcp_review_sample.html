@@ -116,7 +116,7 @@ MCP 도구 사용/표기 규칙. 공식 프론트매터 필드 표를 기준선�
 <li>공식 프로젝트 스킬 경로: <code>.claude/skills/&lt;dir&gt;/SKILL.md</code>,
   개인 스킬 경로: <code>~/.claude/skills/&lt;dir&gt;/SKILL.md</code></li>
 </ul>
-<p><strong>권고 (R-1):</strong> 이 저장소는 스킬을 <strong>배포/수집</strong>하는 컬렉션 성격이라 루트 배치는 합리적이다.
+<p><strong>권고 (R-1) — ✅ 적용됨:</strong> 이 저장소는 스킬을 <strong>배포/수집</strong>하는 컬렉션 성격이라 루트 배치는 합리적이다.
 다만 이 스킬을 <strong>실제로 활성화</strong>하려면 <code>.claude/skills/</code> 아래에 있어야 자동 로드된다.
 README에 설치 경로(예: <code>cp -r reverse-prd ~/.claude/skills/</code>)를 명시하거나,
 프로젝트 내 활성화가 목적이면 <code>.claude/skills/</code>로 이동할 것.</p>
@@ -128,7 +128,7 @@ README에 설치 경로(예: <code>cp -r reverse-prd ~/.claude/skills/</code>)�
 <li><code>Bash(pip install *)</code>, <code>Bash(python *)</code>는 사실상 <strong>임의 코드 실행을 사전 승인</strong>하는 셈이다.</li>
 <li>PDF/docx 생성을 위해 기능상 필요하긴 하나, 광범위한 권한이다.</li>
 </ul>
-<p><strong>권고 (R-2):</strong>
+<p><strong>권고 (R-2) — ✅ 적용됨:</strong>
 - 의도된 동작임을 SKILL.md 또는 README에 명시 (사용자가 권한 범위를 인지하도록).
 - 가능하면 범위를 좁힌다. 예: 생성 스크립트를 <code>scripts/</code>로 분리하고
   <code>Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)</code> 형태로 한정 (아래 R-3 참조).
@@ -152,7 +152,7 @@ README에 설치 경로(예: <code>cp -r reverse-prd ~/.claude/skills/</code>)�
 <p><strong>권고 (R-4):</strong> 지금은 MCP 미사용이 적절. 외부 게시 기능을 넣을 때만 위 표기를 도입.</p>
 <hr />
 <h2 id="6">6. 구조 개선 권고 (선택)</h2>
-<p><strong>권고 (R-3):</strong> 현재 PDF/docx 생성 Python 코드가 SKILL.md 본문에 인라인으로 들어가 있다.
+<p><strong>권고 (R-3) — ✅ 적용됨:</strong> (이전) PDF/docx 생성 Python 코드가 SKILL.md 본문에 인라인으로 있었다.
 공식 문서는 실행 스크립트를 <code>scripts/</code>에 두고 <code>${CLAUDE_SKILL_DIR}</code>로 참조하는
 "supporting files" 구조를 권장한다. 분리 시 이점:</p>
 <ul>
@@ -167,7 +167,7 @@ README에 설치 경로(예: <code>cp -r reverse-prd ~/.claude/skills/</code>)�
 │   └── render_docx.py
 └── reference.md   # Step 1 공통 파싱 규칙 (reverse-spec과 공유)
 </code></pre>
-<p><strong>권고 (R-5):</strong> <code>reverse-spec</code>과 <code>reverse-prd</code>의 Step 1(코드 파싱) 로직이 중복이다.
+<p><strong>권고 (R-5) — ✅ 적용됨:</strong> (이전) <code>reverse-spec</code>과 <code>reverse-prd</code>의 Step 1(코드 파싱) 로직이 중복이었다.
 공통 <code>reference.md</code>로 분리하고 양쪽 SKILL.md에서 참조하면 유지보수성이 오른다.</p>
 <hr />
 <h2 id="7">7. 액션 아이템 정리</h2>
@@ -183,20 +183,20 @@ README에 설치 경로(예: <code>cp -r reverse-prd ~/.claude/skills/</code>)�
 <tbody>
 <tr>
 <td>R-1</td>
-<td>권장</td>
-<td>README에 설치 경로 명시 (또는 <code>.claude/skills/</code>로 이동)</td>
+<td>✅ 적용됨</td>
+<td>README에 설치 경로(<code>~/.claude/skills/</code> · <code>.claude/skills/</code>)·사용법·구조 명시</td>
 <td>중</td>
 </tr>
 <tr>
 <td>R-2</td>
-<td>권장</td>
-<td><code>allowed-tools</code> 광범위 권한 명시 / 범위 축소</td>
+<td>✅ 적용됨</td>
+<td><code>allowed-tools</code>를 <code>Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)</code> 로 축소, <code>pip install</code>도 패키지 한정</td>
 <td>중</td>
 </tr>
 <tr>
 <td>R-3</td>
-<td>선택</td>
-<td>인라인 Python을 <code>scripts/</code>로 분리 + <code>${CLAUDE_SKILL_DIR}</code> 참조</td>
+<td>✅ 적용됨</td>
+<td>인라인 Python을 <code>scripts/render.py</code>로 분리, <code>${CLAUDE_SKILL_DIR}</code> 참조로 호출</td>
 <td>중</td>
 </tr>
 <tr>
@@ -207,8 +207,8 @@ README에 설치 경로(예: <code>cp -r reverse-prd ~/.claude/skills/</code>)�
 </tr>
 <tr>
 <td>R-5</td>
-<td>선택</td>
-<td>Step 1 공통 로직을 <code>reference.md</code>로 분리</td>
+<td>✅ 적용됨</td>
+<td>Step 1 공통 파싱 로직을 <code>reference.md</code>로 분리, 양쪽 SKILL.md에서 <code>${CLAUDE_SKILL_DIR}/reference.md</code> 참조</td>
 <td>하</td>
 </tr>
 <tr>
@@ -219,6 +219,12 @@ README에 설치 경로(예: <code>cp -r reverse-prd ~/.claude/skills/</code>)�
 </tr>
 </tbody>
 </table>
+<blockquote>
+<p><strong>적용 이력 (2026-06-26):</strong> R-2·R-3·R-5는 리팩터링으로 반영됨 — 두 스킬이
+<code>reference.md</code>(공통 파싱)와 <code>scripts/render.py</code>(공통 렌더러)를 공유하고,
+<code>allowed-tools</code>는 스크립트 경로로 한정됨. R-1은 저장소 <code>README.md</code>로 충족.
+R-4(MCP)는 현 기능상 불필요하여 정보성으로 유지.</p>
+</blockquote>
 <hr />
 <h3 id="_1">출처</h3>
 <ul>

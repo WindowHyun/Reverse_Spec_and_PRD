@@ -63,59 +63,15 @@ allowed-tools: >
 
 ### Step 1 — 코드 파싱 & 구조 추출
 
-대상 파일을 읽어 아래 항목을 추출한다. 결과는 내부 메모로 정리하되 사용자에게 출력하지 않는다.
-(reverse-spec과 동일한 추출 로직)
+대상 파일을 읽어 **네비게이션/라우트, 컴포넌트/화면, 조건·검증·권한·API, 화면 전환**을
+추출한다. 상세 추출 규칙은 **`${CLAUDE_SKILL_DIR}/reference.md` (공통 코드 파싱 규칙)** 을 따른다.
+결과는 내부 메모로만 정리하고 사용자에게 출력하지 않는다.
 
-#### 1-A. 네비게이션 / 라우트 구조
-
-```
-추출 대상:
-- <nav> 내부 <a href>, <Link to>, <router-link to>
-- React Router / Vue Router의 routes 배열
-- Next.js pages/ 디렉토리 구조
-- 앵커 href의 #섹션ID (단일 페이지 문서)
-
-추출 형식:
-  [depth] path → 화면명 (예: [1] /login → 로그인화면)
-```
-
-#### 1-B. 컴포넌트 & 화면 목록
-
-```
-추출 대상:
-- export default / export function 으로 시작하는 컴포넌트
-- class명, id명에서 화면 의미 추론
-- placeholder, aria-label, title 속성 → 사용자에게 보이는 기능 단서
-
-추출 형식:
-  컴포넌트명 → 추정 역할 (예: LoginForm → 로그인 폼)
-```
-
-#### 1-C. 기능 단서 & 비즈니스 로직
-
-```
-추출 대상:
-- if / else / switch 조건문 → 요구사항/규칙 단서
-- validation 함수 → 입력 요구사항
-- API endpoint 호출 → 기능/데이터 흐름
-- 에러 처리 → 예외 요구사항
-- 권한 체크 (role, permission, auth) → 사용자 롤/권한 요구사항
-
-추출 형식:
-  코드 근거 → [요구사항 단서] (예: if (cart.length===0) disable → 빈 장바구니 결제 차단 요구)
-```
-
-#### 1-D. 화면 간 전환 관계 (사용자 여정 단서)
-
-```
-추출 대상:
-- navigate(), router.push(), window.location
-- 모달 open/close 트리거
-- 탭 전환, 단계(step) 이동, 결제/가입 등 퍼널 단계
-
-추출 형식:
-  출발화면 → [트리거조건] → 도착화면
-```
+> `reverse-spec` / `reverse-prd`가 동일한 파싱 규칙(`reference.md`)을 공유한다.
+> 추출된 원자료의 의미 해석은 Step 2에서 PRD 목적(요구사항/목표/페르소나화)에 맞게 수행한다.
+> 특히 `reference.md`의 **범위·정확성 표기 규칙**(소스 미포함 컴포넌트 → `[정보 없음]`,
+> 민감정보 비포함, 추정 `[추정]` 표기)을 반드시 적용한다 — 라우트에서 import만 된
+> 화면을 분석된 것처럼 단정하지 말 것.
 
 ### Step 2 — 의미 분석 (3개 축 동시 수행)
 
