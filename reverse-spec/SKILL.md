@@ -6,7 +6,10 @@ description: >
   인자로 파일 경로 또는 디렉토리를 받는다.
 argument-hint: <파일_또는_디렉토리_경로> [--format pdf|docx] [--lang ko|en]
 allowed-tools: >
-  Read, Glob, Bash(find *), Bash(ls *), Bash(cat *), Bash(pip install *), Bash(python *)
+  Read, Glob, Write,
+  Bash(find *), Bash(ls *),
+  Bash(pip install weasyprint *), Bash(pip install markdown *), Bash(pip install python-docx *),
+  Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)
 ---
 
 # reverse-spec — 코드 역기획 정책서 생성기
@@ -180,132 +183,42 @@ Step 1 추출 결과를 기반으로 다음 3가지를 병렬 추론한다.
 
 ### Step 4 — 출력 파일 생성
 
-#### 4-A. 출력 경로 결정
+문서 렌더링은 인라인 코드가 아니라 스킬에 동봉된 **`scripts/render.py`** 로 수행한다.
+(Markdown → PDF / DOCX / HTML 변환을 한 스크립트가 처리하며, `allowed-tools` 가
+`Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)` 로 한정되어 있어 임의 코드 실행 권한을 주지 않는다.)
 
-```
-기본 출력 경로: ./reverse-spec-output/
-파일명: reverse_spec_YYYYMMDD_HHMMSS.[pdf|docx]
-```
+#### 4-A. 본문을 Markdown 파일로 저장
 
-#### 4-B. PDF 출력 (`--format pdf` 또는 기본값)
+Step 3에서 구성한 정책서 전체 본문(Markdown)을 `Write` 도구로 임시 파일에 저장한다.
+예: `reverse-spec-output/_spec_body.md`
 
-```bash
-pip install weasyprint markdown --quiet
-```
-
-아래 Python 스크립트를 실행한다:
-
-```python
-import datetime, markdown, pathlib
-from weasyprint import HTML, CSS
-
-content = """{{ Step3에서 구성한 전체 문서 내용 (Markdown) }}"""
-
-md_html = markdown.markdown(content, extensions=['tables', 'toc', 'fenced_code'])
-
-html_template = f"""
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="UTF-8">
-<style>
-  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&display=swap');
-  body {{ font-family: 'Noto Sans KR', sans-serif; font-size: 11pt; line-height: 1.8;
-          color: #1a1a1a; margin: 0; padding: 0; }}
-  h1 {{ font-size: 20pt; border-bottom: 2px solid #333; padding-bottom: 8px; margin-top: 40px; }}
-  h2 {{ font-size: 15pt; border-left: 4px solid #555; padding-left: 10px; margin-top: 30px; }}
-  h3 {{ font-size: 12pt; color: #444; margin-top: 20px; }}
-  table {{ width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 10pt; }}
-  th {{ background: #2c2c2c; color: white; padding: 8px 12px; text-align: left; }}
-  td {{ border: 1px solid #ccc; padding: 7px 12px; vertical-align: top; }}
-  tr:nth-child(even) td {{ background: #f8f8f8; }}
-  code {{ background: #f0f0f0; padding: 2px 5px; border-radius: 3px; font-size: 9.5pt; }}
-  pre {{ background: #1e1e1e; color: #d4d4d4; padding: 14px; border-radius: 6px;
-         font-size: 9pt; overflow-x: auto; }}
-  .tag-assumed {{ color: #c47a00; font-size: 9pt; font-weight: bold; }}
-  .tag-missing  {{ color: #999; font-size: 9pt; }}
-  @page {{
-    size: A4;
-    margin: 20mm 18mm 20mm 20mm;
-    @top-center {{
-      content: "역기획 정책서";
-      font-size: 9pt; color: #888;
-    }}
-    @bottom-right {{
-      content: counter(page) " / " counter(pages);
-      font-size: 9pt; color: #888;
-    }}
-  }}
-</style>
-</head>
-<body>
-{md_html}
-</body>
-</html>
-"""
-
-out_dir = pathlib.Path("reverse-spec-output")
-out_dir.mkdir(exist_ok=True)
-ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-out_path = out_dir / f"reverse_spec_{ts}.pdf"
-
-HTML(string=html_template).write_pdf(str(out_path))
-print(f"✅ PDF 생성 완료: {out_path}")
-```
-
-#### 4-C. Word 출력 (`--format docx`)
+#### 4-B. 의존성 설치 (최초 1회)
 
 ```bash
-pip install python-docx --quiet
+pip install weasyprint markdown python-docx --quiet
 ```
 
-```python
-import datetime, pathlib
-from docx import Document
-from docx.shared import Pt, RGBColor, Cm
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+> 환경에 이미 설치돼 있으면 생략한다. `--format html` 미리보기는 weasyprint 없이도 가능하다.
 
-doc = Document()
+#### 4-C. 렌더링 실행
 
-# 페이지 여백
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
-section = doc.sections[0]
-section.top_margin    = Cm(2.0)
-section.bottom_margin = Cm(2.0)
-section.left_margin   = Cm(2.5)
-section.right_margin  = Cm(2.0)
-
-# 스타일 설정 함수
-def add_heading(doc, text, level=1):
-    h = doc.add_heading(text, level=level)
-    h.runs[0].font.color.rgb = RGBColor(0x1a, 0x1a, 0x1a)
-    return h
-
-def add_policy_table(doc, rows):
-    """정책 항목 테이블: [번호, 정책 내용, 근거, 비고]"""
-    table = doc.add_table(rows=1 + len(rows), cols=4)
-    table.style = 'Table Grid'
-    headers = ['No', '정책 내용', '코드 근거', '비고']
-    for i, h in enumerate(headers):
-        cell = table.rows[0].cells[i]
-        cell.text = h
-        cell.paragraphs[0].runs[0].bold = True
-    for i, row in enumerate(rows):
-        for j, val in enumerate(row):
-            table.rows[i+1].cells[j].text = str(val)
-    return table
-
-# ── 본문 채우기 (Step 3 내용을 섹션별로 삽입) ──
-# 여기에 Step 3의 각 섹션 내용을 doc.add_heading / doc.add_paragraph로 삽입
-
-out_dir = pathlib.Path("reverse-spec-output")
-out_dir.mkdir(exist_ok=True)
-ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-out_path = out_dir / f"reverse_spec_{ts}.docx"
-doc.save(str(out_path))
-print(f"✅ DOCX 생성 완료: {out_path}")
+```bash
+python ${CLAUDE_SKILL_DIR}/scripts/render.py \
+  --input  reverse-spec-output/_spec_body.md \
+  --format pdf \
+  --title  "역기획 정책서" \
+  --accent "#2c2c2c" \
+  --outdir reverse-spec-output \
+  --name   reverse_spec
 ```
+
+- `--format` : `pdf`(기본) / `docx` / `html`(미리보기)
+- `--lang en` 요청 시에도 동일 스크립트를 쓰되 `--title "Reverse-engineered Spec"` 로 바꾼다.
+- 출력 파일: `reverse-spec-output/reverse_spec_YYYYMMDD_HHMMSS.[pdf|docx|html]`
+
+> `render.py` 는 GFM 파이프 테이블 · 헤딩 · 코드블록 · 불릿 · 인용을 PDF/DOCX 모두에서
+> 처리한다. 따라서 정책 항목표는 본문 Markdown에 표(`| No | 정책 내용 | 코드 근거 | 비고 |`)로
+> 작성하면 그대로 변환된다.
 
 ### Step 5 — 완료 보고
 

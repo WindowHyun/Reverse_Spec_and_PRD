@@ -124,8 +124,8 @@ reverse-prd/
 | ID | 구분 | 내용 | 우선순위 |
 |----|------|------|----------|
 | R-1 | 권장 | README에 설치 경로 명시 (또는 `.claude/skills/`로 이동) | 중 |
-| R-2 | 권장 | `allowed-tools` 광범위 권한 명시 / 범위 축소 | 중 |
-| R-3 | 선택 | 인라인 Python을 `scripts/`로 분리 + `${CLAUDE_SKILL_DIR}` 참조 | 중 |
+| R-2 | ✅ 적용됨 | `allowed-tools`를 `Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)` 로 축소, `pip install`도 패키지 한정 | 중 |
+| R-3 | ✅ 적용됨 | 인라인 Python을 `scripts/render.py`로 분리, `${CLAUDE_SKILL_DIR}` 참조로 호출 | 중 |
 | R-4 | 정보 | MCP는 외부 게시 확장 시에만 `mcp__server__tool` 표기로 도입 | 하 |
 | R-5 | 선택 | Step 1 공통 로직을 `reference.md`로 분리 | 하 |
 | — | 정보 | `name` 필드는 장식용(무해). 제거해도 됨 | 하 |
