@@ -1,105 +1,213 @@
-# Skills — 코드 역기획 문서 생성 스킬 모음
+# Skills — Reverse-Engineering Spec & PRD Generators
 
-완성된 프론트엔드 코드(HTML/JS/TS/Vue/React)를 **정적 분석**해서, 거꾸로 기획 문서를
-재구성(역기획)하는 [Claude Code](https://code.claude.com/docs) 스킬 모음이다.
+**English** · [한국어](README.ko.md)
 
-| 스킬 | 산출물 | 핵심 질문 | 주요 독자 |
-|------|--------|-----------|-----------|
-| [`reverse-spec`](reverse-spec/SKILL.md) | 역기획 **정책서** (규칙/정책 중심) | "어떻게 동작하는가" | 개발 · QA |
-| [`reverse-prd`](reverse-prd/SKILL.md) | 역기획 **PRD** (요구사항/목표 중심) | "무엇을 왜 만들었는가" | PM · 기획 · 디자인 |
+A collection of [Claude Code](https://code.claude.com/docs) skills that statically
+analyze finished frontend code (HTML/JS/TS/Vue/React) and reconstruct the planning
+documents behind it ("reverse planning" / 역기획).
 
-두 스킬은 동일한 코드 파싱 엔진([`reference.md`](reverse-prd/reference.md))과
-문서 렌더러([`scripts/render.py`](reverse-prd/scripts/render.py))를 공유한다.
-한 코드베이스에 둘 다 돌리면 **PRD(왜/무엇) + 정책서(어떻게)** 세트를 얻는다.
+| Skill | Output | Core question | Primary readers |
+|-------|--------|---------------|-----------------|
+| [`reverse-spec`](reverse-spec/SKILL.md) | Reverse **policy spec** (rules/policy-centric) | "How does it behave?" | Dev · QA |
+| [`reverse-prd`](reverse-prd/SKILL.md) | Reverse **PRD** (requirements/goal-centric) | "What was built and why?" | PM · Design |
+
+Both skills share one code-parsing spec ([`reference.md`](reverse-prd/reference.md)) and one
+document renderer ([`scripts/render.py`](reverse-prd/scripts/render.py)). Run both on the same
+codebase to get a **PRD (why/what) + policy spec (how)** set.
 
 ---
 
-## 설치
+## What a "skill" is here (and why it's portable)
 
-스킬은 디렉토리 단위로 동작하며, 디렉토리명이 곧 커맨드명(`/reverse-prd`)이 된다.
+Each skill is just two things:
 
-```bash
-# 개인 스킬 (모든 프로젝트에서 사용)
-cp -r reverse-prd reverse-spec ~/.claude/skills/
+1. **`SKILL.md`** — a Markdown instructions file (YAML frontmatter + procedure).
+2. **`scripts/render.py`** — a plain local Python script that turns Markdown into PDF/DOCX/HTML.
 
-# 또는 특정 프로젝트에서만
-mkdir -p .claude/skills
-cp -r reverse-prd reverse-spec .claude/skills/
-```
+That means the skill is **natively** a Claude Code Agent Skill, but the same `SKILL.md`
+body works as a *custom prompt / custom command / rules file* in other AI tools, and
+`render.py` runs from any shell. The setup recipes below show how to register it in each tool.
 
-설치 후 Claude Code에서 `/reverse-prd`, `/reverse-spec` 으로 호출하거나,
-"역기획 PRD 만들어줘" 처럼 자연어로 요청하면 자동 실행된다.
-
-### 의존성 (문서 렌더링용)
+### Dependencies (for document rendering)
 
 ```bash
 pip install weasyprint markdown python-docx
 ```
 
-`--format html` 미리보기는 `markdown`만으로 가능하다. PDF는 `weasyprint`,
-DOCX는 `python-docx`가 필요하다.
+`--format html` preview needs only `markdown`; PDF needs `weasyprint`; DOCX needs `python-docx`.
 
 ---
 
-## 사용법
+## Setup per tool
+
+> Examples below install `reverse-prd`; repeat for `reverse-spec`.
+
+### 1. Claude Code (terminal CLI) — native Agent Skill ✅
 
 ```bash
-/reverse-prd                          # 현재 디렉토리 분석, PDF 출력
-/reverse-prd src/index.html           # 특정 파일
-/reverse-prd src/ --format docx       # 디렉토리 전체 + Word 출력
+# Personal (all projects)
+cp -r reverse-prd reverse-spec ~/.claude/skills/
+# …or project-local (team-shared, committed to the repo)
+mkdir -p .claude/skills && cp -r reverse-prd reverse-spec .claude/skills/
+```
+
+Invoke with `/reverse-prd`, or just ask in natural language ("make a reverse PRD from
+`src/`") — Claude auto-loads it when your request matches the `description`. Skills are picked
+up mid-session (no restart). The directory name becomes the command name.
+Docs: <https://code.claude.com/docs/en/skills>
+
+### 2. Claude CLI — same as Claude Code
+
+There is no separate "Claude CLI" product: the terminal tool is **Claude Code**, run via the
+`claude` command. Use the section 1 steps. (Don't confuse it with the Anthropic API SDK.)
+
+### 3. Claude Desktop app — upload as a ZIP
+
+The Claude chat app supports custom Skills, but via **upload**, not a folder on disk:
+
+```bash
+# zip the skill folder (it must contain SKILL.md)
+cd reverse-prd && zip -r ../reverse-prd.zip . && cd ..
+```
+
+Then in the app: **Settings → Capabilities → Skills → Upload skill**, and select the ZIP.
+Requires a paid plan with code execution enabled. Note: in the desktop ZIP form the `name`
+field is **required** (lowercase letters/numbers/hyphens, ≤64 chars, and it may not contain the
+words "claude" or "anthropic"). To add MCP servers instead, use **Settings → Developer → Edit
+Config** (`claude_desktop_config.json`).
+Docs: <https://support.claude.com/en/articles/12512180-use-skills-in-claude>
+
+### 4. OpenAI Codex CLI — custom prompt + helper script
+
+Codex turns Markdown files in `~/.codex/prompts/` into slash commands:
+
+```bash
+mkdir -p ~/.codex/prompts
+cp reverse-prd/SKILL.md ~/.codex/prompts/reverse-prd.md
+```
+
+Invoke with `/reverse-prd` in the Codex CLI or IDE extension. For always-on guidance instead,
+put the procedure in an `AGENTS.md` at your repo root. Run the renderer directly from Codex's
+shell: `python reverse-prd/scripts/render.py …`.
+Heads-up: OpenAI marks custom prompts as **deprecated** in favor of Codex Skills — both still
+work today. Docs: <https://developers.openai.com/codex/custom-prompts>
+
+### 5. Gemini CLI (Google) — TOML custom command
+
+Gemini custom commands are TOML files with a `prompt` field:
+
+```bash
+mkdir -p ~/.gemini/commands
+cat > ~/.gemini/commands/reverse-prd.toml <<'EOF'
+description = "Reverse-engineer a PRD from code, render to PDF/DOCX."
+prompt = """
+Follow this procedure to produce a reverse-engineering PRD from the target code.
+Target path: {{args}}
+
+<paste the body of reverse-prd/SKILL.md here, or summarize its steps>
+Then render with: python reverse-prd/scripts/render.py --input <body.md> --format pdf
+"""
+EOF
+```
+
+Invoke with `/reverse-prd src/`. `{{args}}` receives whatever you type after the command.
+For always-on context use `GEMINI.md`; for MCP use `~/.gemini/settings.json`.
+Docs: <https://geminicli.com/docs/cli/custom-commands/>
+
+### 6. Google Antigravity (agentic IDE) — Workflow (best match)
+
+The closest thing to a slash-command skill is an Antigravity **Workflow**:
+
+```bash
+mkdir -p .agent/workflows
+cp reverse-prd/SKILL.md .agent/workflows/reverse-prd.md
+```
+
+Invoke `/reverse-prd` in the Agent panel. Antigravity also has **Skills**
+(commonly `.agent/skills/<name>/SKILL.md`, but the exact path varies across IDE/CLI and
+versions — verify against your build), **Rules** (`GEMINI.md` / `AGENTS.md` / `.agent/rules/`),
+and MCP config at `~/.gemini/config/mcp_config.json`.
+Docs: <https://antigravity.google/docs/rules-workflows>
+
+### Quick comparison
+
+| Tool | Mechanism | Put the file at | Format | Invoke |
+|------|-----------|-----------------|--------|--------|
+| Claude Code | Agent Skill | `~/.claude/skills/<n>/SKILL.md` or `.claude/skills/<n>/SKILL.md` | YAML+MD | `/<n>` or auto |
+| Claude CLI | = Claude Code | same | same | same |
+| Claude Desktop | Skill (ZIP upload) | Settings → Capabilities → Skills | YAML+MD (zipped) | auto |
+| Codex CLI | Custom prompt | `~/.codex/prompts/<n>.md` | MD | `/<n>` |
+| Gemini CLI | Custom command | `~/.gemini/commands/<n>.toml` | TOML | `/<n>` |
+| Antigravity | Workflow / Skill | `.agent/workflows/<n>.md` | MD | `/<n>` |
+
+> **Gotchas.** Codex custom prompts are deprecated (use Codex Skills going forward).
+> Antigravity skill directories differ across CLI vs IDE and versions — confirm your build's
+> path. Claude Desktop Skills are per-user ZIP uploads, not synced to Claude Code or the API.
+> For non-Claude tools, paste/adapt the `SKILL.md` body into that tool's prompt/command and run
+> `render.py` from its shell.
+
+---
+
+## Usage (Claude Code)
+
+```bash
+/reverse-prd                          # analyze current dir, PDF output
+/reverse-prd src/index.html           # a specific file
+/reverse-prd src/ --format docx       # whole directory + Word output
 /reverse-spec . --format pdf --lang en
 ```
 
-출력은 `./reverse-prd-output/` (또는 `reverse-spec-output/`)에
-`reverse_prd_YYYYMMDD_HHMMSS.[pdf|docx|html]` 형식으로 생성된다.
+Output lands in `./reverse-prd-output/` (or `reverse-spec-output/`) as
+`reverse_prd_YYYYMMDD_HHMMSS.[pdf|docx|html]`.
 
 ---
 
-## 동작 단계
+## How it works
 
-1. **Phase 1 — 코드 파싱**: nav/route, 컴포넌트, 조건·검증·권한·API, 화면 전환 추출
-   (규칙: [`reference.md`](reverse-prd/reference.md))
-2. **Phase 2 — 의미 분석**: 화면 흐름 / 목적 / 정책·요구사항 추론
-3. **Phase 3 — 문서 구조 구성**: 정책서 또는 PRD 목차에 배치
-4. **Phase 4 — 출력**: `scripts/render.py`로 Markdown → PDF/DOCX/HTML 렌더링
+1. **Phase 1 — Parse:** extract nav/routes, components, conditionals/validation/auth/API,
+   and screen transitions (rules in [`reference.md`](reverse-prd/reference.md)).
+2. **Phase 2 — Interpret:** infer screen flow / purpose / policy or requirements.
+3. **Phase 3 — Compose:** lay content into the policy-spec or PRD outline.
+4. **Phase 4 — Render:** `scripts/render.py` converts Markdown → PDF/DOCX/HTML.
 
-### 정확성 원칙
+### Accuracy principles
 
-정적 분석의 한계를 문서가 정직하게 드러내도록 다음을 항상 적용한다.
+Static analysis is honest about its limits:
 
-- `[추정]` — 코드에 근거 없는 의도/목표/배경/페르소나
-- `[정보 없음 — 별도 확인 필요]` — 코드에 단서가 없는 항목, **import만 되고 소스가 없는 화면**
-- 민감 정보(API key/password)는 문서에 포함하지 않고 별도 경고로만 표시
+- `[추정]` / *[assumed]* — intent, goals, background, personas with no direct code basis.
+- `[정보 없음 — 별도 확인 필요]` / *[no info — verify separately]* — items absent from the
+  code, including **components that are only imported but whose source isn't in scope**.
+- Secrets (API keys/passwords) are never embedded in the document — only flagged as a warning.
 
 ---
 
-## 저장소 구조
+## Repository layout
 
 ```
 .
-├── reverse-spec/          # 역기획 정책서 스킬
+├── reverse-spec/            # reverse policy-spec skill
 │   ├── SKILL.md
-│   ├── reference.md       # 공통 코드 파싱 규칙
-│   └── scripts/render.py  # Markdown → PDF/DOCX/HTML 렌더러
-├── reverse-prd/           # 역기획 PRD 스킬 (구조 동일)
+│   ├── reference.md         # shared code-parsing rules
+│   └── scripts/render.py    # Markdown → PDF/DOCX/HTML renderer
+├── reverse-prd/             # reverse PRD skill (same structure)
 │   ├── SKILL.md
 │   ├── reference.md
 │   └── scripts/render.py
 ├── docs/
-│   └── skill-mcp-review.md   # 공식 문서 기반 Skill/MCP 리뷰 리포트
+│   └── skill-mcp-review.md  # official-docs-based Skill/MCP compliance review
 └── examples/
-    ├── mock-shop/            # 데모용 목 e-커머스 앱 (React Router)
-    ├── reverse-prd-output/   # mock-shop 분석 PRD 샘플 (HTML)
-    └── review-output/        # 리뷰 리포트 HTML 샘플
+    ├── mock-shop/           # demo mock e-commerce app (React Router)
+    ├── reverse-prd-output/  # sample PRD from mock-shop (HTML)
+    └── review-output/       # sample review report (HTML)
 ```
 
-> `reference.md`와 `scripts/render.py`는 두 스킬에서 **동일 사본**으로 유지된다
-> (스킬은 자기 디렉토리 내부 파일만 `${CLAUDE_SKILL_DIR}`로 참조하므로).
-> 한쪽을 수정하면 다른 쪽에도 복사할 것.
+> `reference.md` and `scripts/render.py` are kept as **identical copies** in both skills (a
+> skill can only reference files inside its own directory via `${CLAUDE_SKILL_DIR}`). Edit one,
+> copy to the other.
 
 ---
 
-## 참고
+## See also
 
-- 공식 문서 기반 스펙 준수 리뷰: [`docs/skill-mcp-review.md`](docs/skill-mcp-review.md)
-- 샘플 출력 미리보기: `examples/reverse-prd-output/reverse_prd_mock-shop_sample.html`
+- Official-docs-based compliance review: [`docs/skill-mcp-review.md`](docs/skill-mcp-review.md)
+- Sample output preview: `examples/reverse-prd-output/reverse_prd_mock-shop_sample.html`
