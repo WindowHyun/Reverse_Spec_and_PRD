@@ -18,13 +18,17 @@
 
 ## 여기서 "스킬"이란 (그리고 왜 이식 가능한가)
 
-각 스킬은 두 가지로 구성된다.
+각 스킬은 `SKILL.md` 지침 파일과 순수 로컬 Python 스크립트 3종으로 구성된다.
 
-1. **`SKILL.md`** — Markdown 지침 파일 (YAML 프론트매터 + 절차).
-2. **`scripts/render.py`** — Markdown을 PDF/DOCX/HTML로 변환하는 순수 로컬 Python 스크립트.
+1. **`SKILL.md`** — 절차 (YAML 프론트매터 + Markdown). *사실은 파서가 추출하고,
+   LLM은 해석만 쓴다*는 하이브리드 원칙을 따른다.
+2. **`scripts/extract.py`** — 결정적 사실 추출기 (라우트·API·문구·상태·연동·스냅샷 —
+   같은 코드면 항상 같은 사실 표).
+3. **`scripts/flowgen.py`** — 유저플로우 SVG 생성기 (HTML·PDF 모두에서 렌더링).
+4. **`scripts/render.py`** — Markdown → PDF+HTML 쌍(또는 DOCX) 렌더러.
 
 즉 이 스킬은 **기본적으로** Claude Code Agent Skill이지만, 같은 `SKILL.md` 본문을 다른 AI
-도구의 *커스텀 프롬프트 / 커스텀 커맨드 / 규칙 파일* 로 그대로 쓸 수 있고, `render.py`는 어떤
+도구의 *커스텀 프롬프트 / 커스텀 커맨드 / 규칙 파일* 로 그대로 쓸 수 있고, 스크립트들은 어떤
 셸에서든 실행된다. 아래 도구별 설정법을 참고하라.
 
 ### 의존성 (문서 렌더링용)
@@ -214,8 +218,9 @@ PDF는 공유/인쇄용. `--format docx,html`을 지정하면 PDF 대신 Word로
 │   └── check-sync.sh        # 공유 파일 사본 일치 검증 스크립트
 └── examples/
     ├── mock-shop/           # 데모용 목 e-커머스 앱 (React Router)
-    ├── reverse-prd-output/  # mock-shop 분석 PRD 샘플 (HTML)
-    └── review-output/       # 리뷰 리포트 HTML 샘플
+    ├── reverse-prd-output/  # mock-shop PRD 샘플 (PDF+HTML 쌍, 본문 md, flow JSON/SVG)
+    ├── review-output/       # 리뷰 리포트 PDF+HTML 쌍
+    └── hybrid-demo/         # 하이브리드 추출 개념 증명 (결정성 데모)
 ```
 
 > `reference.md`와 `scripts/render.py`는 두 스킬에서 **동일 사본**으로 유지된다(스킬은

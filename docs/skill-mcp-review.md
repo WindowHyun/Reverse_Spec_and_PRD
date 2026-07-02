@@ -2,7 +2,7 @@
 
 > 대상: `reverse-spec/SKILL.md`, `reverse-prd/SKILL.md`
 > 기준 문서(공식): `code.claude.com/docs/en/skills.md`, `.../commands.md`, `.../mcp.md`
-> 작성일: 2026-06-23
+> 작성일: 2026-06-23 · **최신화: 2026-07-02** (8장 "현행 구조 스냅샷"에 이후 변경 반영)
 
 / 검토 범위: SKILL.md 프론트매터 스펙 준수 여부, 디렉토리 구조, `allowed-tools` 포맷,
 MCP 도구 사용/표기 규칙. 공식 프론트매터 필드 표를 기준선으로 사용했다.
@@ -34,7 +34,7 @@ MCP 도구 사용/표기 규칙. 공식 프론트매터 필드 표를 기준선�
 | `name` | `reverse-spec` / `reverse-prd` | 선택. **디렉토리 기반 스킬에서는 커맨드명이 디렉토리명에서 결정**되고, `name`은 plugin-root SKILL.md에서만 권위를 가짐 | ⚠️ 동작상 무시됨(장식용). 디렉토리명과 일치하므로 무해 |
 | `description` | 트리거 문구 포함 한국어 설명 | **권장 필드.** 평문, listing에서 1,536자에서 잘림. 핵심 use case를 앞에 | ✅ 양호 (분량 충분히 짧음, 트리거 포함) |
 | `argument-hint` | `<파일_또는_디렉토리_경로> [--format ...]` | 선택. 자동완성 시 표시되는 평문 힌트 | ✅ 유효 |
-| `allowed-tools` | `Read, Glob, Bash(find *), Bash(ls *), Bash(cat *), Bash(pip install *), Bash(python *)` | 선택. 공백/콤마 구분 문자열 또는 YAML 리스트. `Bash(git add *)` 형태 패턴 허용 | ✅ 포맷 유효 (단, 보안 권고 → 4장) |
+| `allowed-tools` | (최초 리뷰 시) `Bash(python *)` 등 광범위 → (현행) 스크립트 경로 한정 패턴, 8장 참조 | 선택. 공백/콤마 구분 문자열 또는 YAML 리스트. `Bash(git add *)` 형태 패턴 허용 | ✅ 포맷 유효 (보안 권고 R-2 적용 완료) |
 
 YAML folded scalar(`>`)로 작성된 `description`/`allowed-tools`는 단일 문자열로 접히며,
 콤마 구분 문자열은 공식이 허용하는 포맷이라 문제없다.
@@ -107,15 +107,16 @@ allowed-tools: >
 - `allowed-tools`를 `Bash(python */scripts/render.py *)`로 좁혀 R-2 보안 권고도 충족.
   (프론트매터는 `${CLAUDE_SKILL_DIR}`를 확장하지 않으므로 경로 와일드카드 패턴 사용.)
 
-예시 구조:
+현행 구조 (적용 결과):
 
 ```
-reverse-prd/
+reverse-prd/                 # reverse-spec도 동일 구조
 ├── SKILL.md
-├── scripts/
-│   ├── render_pdf.py
-│   └── render_docx.py
-└── reference.md   # Step 1 공통 파싱 규칙 (reverse-spec과 공유)
+├── reference.md             # 1-A~1-H 공통 파싱 규칙 (reverse-spec과 동일 사본)
+└── scripts/
+    ├── extract.py           # 결정적 사실 추출기 (1-A~1-H 구현, --emit-flow)
+    ├── flowgen.py           # 유저플로우 SVG 생성기 (HTML·PDF 겸용)
+    └── render.py            # Markdown → PDF+HTML(기본 쌍) / DOCX 렌더러
 ```
 
 **권고 (R-5) — ✅ 적용됨:** (이전) `reverse-spec`과 `reverse-prd`의 Step 1(코드 파싱) 로직이 중복이었다.
@@ -144,6 +145,53 @@ reverse-prd/
 > (fail-closed — 보안 문제는 아니나 사전 승인 효과 없음). 공식 permissions 문서의
 > 와일드카드 시맨틱(`*`는 공백 포함 임의 문자열 매칭)에 따라
 > `Bash(python */scripts/render.py *)` 로 교체하여 실제로 매칭되는 최소 패턴으로 정정함.
+
+---
+
+## 8. 현행 구조 스냅샷 (2026-07-02 기준)
+
+최초 리뷰(6장까지) 이후 반영된 변경 사항의 요약. 상세 이력은 git log 참조.
+
+**하이브리드 파이프라인 (파서 우선)**
+
+| 단계 | 담당 | 스크립트 | 성질 |
+|------|------|----------|------|
+| 사실 추출 (1-A~1-H) | 파서 | `scripts/extract.py` | 결정적 — 같은 코드 → 같은 사실 표 (SHA-256 검증) |
+| 유저플로우 다이어그램 | 파서+LLM | `scripts/flowgen.py` | 스켈레톤은 파서, 라벨·`[추정]` 점선은 LLM 보강 |
+| 해석·서술 (Step 2~3) | LLM | — | 사실 표 밖 내용 도입 금지 원칙 |
+| 렌더링 | 파서 | `scripts/render.py` | **PDF+HTML 쌍 기본** (`--format pdf,html`), DOCX 옵션 |
+
+**현행 `allowed-tools` (두 스킬 공통)**
+
+```
+Read, Glob, Write, Bash(find *), Bash(ls *),
+Bash(pip install weasyprint *), Bash(pip install markdown *), Bash(pip install python-docx *),
+Bash(python */scripts/render.py *), Bash(python */scripts/flowgen.py *), Bash(python */scripts/extract.py *),
+Bash(python3 */scripts/render.py *), Bash(python3 */scripts/flowgen.py *), Bash(python3 */scripts/extract.py *),
+Bash(pip3 install weasyprint *), Bash(pip3 install markdown *), Bash(pip3 install python-docx *)
+```
+
+- `python3`/`pip3` 변형은 macOS(스톡 환경에 `python` 부재) 대응.
+- 여전히 임의 Python 실행은 사전 승인되지 않음 — 동봉 스크립트 3종만 허용.
+
+**대형 코드베이스 분할 모드**
+
+- Step 0에서 소스 30개 초과 판정 시, 모듈 단위로 서브에이전트에 extract.py 실행을
+  위임(격리 컨텍스트, 사실 표만 회수) 후 병합. 공식 sub-agents/large-codebases 패턴.
+
+**문서 목차 확장**
+
+- 에러/메시지 카탈로그(문구 원문 보존), 상태 관리 & 데이터 흐름, 외부 연동 인벤토리,
+  이벤트/트래킹 명세(KPI 근거 연결), As-Is 스냅샷(커밋 해시 기준선), 추적성 매트릭스.
+
+**플랫폼 안내 (README·SKILL.md 4-C)**
+
+- Windows PDF: MSYS2 + `pacman -S mingw-w64-ucrt-x86_64-pango` (WeasyPrint 공식 권장),
+  실패 시 `--format docx,html` 폴백. macOS: `brew install weasyprint`.
+
+**공유 사본 관리**
+
+- `reference.md` + `scripts/` 3종은 두 스킬에 동일 사본 — `tools/check-sync.sh`로 검증.
 
 ---
 

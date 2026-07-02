@@ -37,7 +37,7 @@
 <blockquote>
 <p>대상: <code>reverse-spec/SKILL.md</code>, <code>reverse-prd/SKILL.md</code>
 기준 문서(공식): <code>code.claude.com/docs/en/skills.md</code>, <code>.../commands.md</code>, <code>.../mcp.md</code>
-작성일: 2026-06-23</p>
+작성일: 2026-06-23 · <strong>최신화: 2026-07-02</strong> (8장 "현행 구조 스냅샷"에 이후 변경 반영)</p>
 </blockquote>
 <p>/ 검토 범위: SKILL.md 프론트매터 스펙 준수 여부, 디렉토리 구조, <code>allowed-tools</code> 포맷,
 MCP 도구 사용/표기 규칙. 공식 프론트매터 필드 표를 기준선으로 사용했다.</p>
@@ -112,9 +112,9 @@ MCP 도구 사용/표기 규칙. 공식 프론트매터 필드 표를 기준선�
 </tr>
 <tr>
 <td><code>allowed-tools</code></td>
-<td><code>Read, Glob, Bash(find *), Bash(ls *), Bash(cat *), Bash(pip install *), Bash(python *)</code></td>
+<td>(최초 리뷰 시) <code>Bash(python *)</code> 등 광범위 → (현행) 스크립트 경로 한정 패턴, 8장 참조</td>
 <td>선택. 공백/콤마 구분 문자열 또는 YAML 리스트. <code>Bash(git add *)</code> 형태 패턴 허용</td>
-<td>✅ 포맷 유효 (단, 보안 권고 → 4장)</td>
+<td>✅ 포맷 유효 (보안 권고 R-2 적용 완료)</td>
 </tr>
 </tbody>
 </table>
@@ -174,13 +174,14 @@ README에 설치 경로(예: <code>cp -r reverse-prd ~/.claude/skills/</code>)�
 <li><code>allowed-tools</code>를 <code>Bash(python */scripts/render.py *)</code>로 좁혀 R-2 보안 권고도 충족.
   (프론트매터는 <code>${CLAUDE_SKILL_DIR}</code>를 확장하지 않으므로 경로 와일드카드 패턴 사용.)</li>
 </ul>
-<p>예시 구조:</p>
-<pre><code>reverse-prd/
+<p>현행 구조 (적용 결과):</p>
+<pre><code>reverse-prd/                 # reverse-spec도 동일 구조
 ├── SKILL.md
-├── scripts/
-│   ├── render_pdf.py
-│   └── render_docx.py
-└── reference.md   # Step 1 공통 파싱 규칙 (reverse-spec과 공유)
+├── reference.md             # 1-A~1-H 공통 파싱 규칙 (reverse-spec과 동일 사본)
+└── scripts/
+    ├── extract.py           # 결정적 사실 추출기 (1-A~1-H 구현, --emit-flow)
+    ├── flowgen.py           # 유저플로우 SVG 생성기 (HTML·PDF 겸용)
+    └── render.py            # Markdown → PDF+HTML(기본 쌍) / DOCX 렌더러
 </code></pre>
 <p><strong>권고 (R-5) — ✅ 적용됨:</strong> (이전) <code>reverse-spec</code>과 <code>reverse-prd</code>의 Step 1(코드 파싱) 로직이 중복이었다.
 공통 <code>reference.md</code>로 분리하고 양쪽 SKILL.md에서 참조하면 유지보수성이 오른다.</p>
@@ -245,6 +246,76 @@ R-4(MCP)는 현 기능상 불필요하여 정보성으로 유지.</p>
 와일드카드 시맨틱(<code>*</code>는 공백 포함 임의 문자열 매칭)에 따라
 <code>Bash(python */scripts/render.py *)</code> 로 교체하여 실제로 매칭되는 최소 패턴으로 정정함.</p>
 </blockquote>
+<hr />
+<h2 id="8-2026-07-02">8. 현행 구조 스냅샷 (2026-07-02 기준)</h2>
+<p>최초 리뷰(6장까지) 이후 반영된 변경 사항의 요약. 상세 이력은 git log 참조.</p>
+<p><strong>하이브리드 파이프라인 (파서 우선)</strong></p>
+<table>
+<thead>
+<tr>
+<th>단계</th>
+<th>담당</th>
+<th>스크립트</th>
+<th>성질</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>사실 추출 (1-A~1-H)</td>
+<td>파서</td>
+<td><code>scripts/extract.py</code></td>
+<td>결정적 — 같은 코드 → 같은 사실 표 (SHA-256 검증)</td>
+</tr>
+<tr>
+<td>유저플로우 다이어그램</td>
+<td>파서+LLM</td>
+<td><code>scripts/flowgen.py</code></td>
+<td>스켈레톤은 파서, 라벨·<code>[추정]</code> 점선은 LLM 보강</td>
+</tr>
+<tr>
+<td>해석·서술 (Step 2~3)</td>
+<td>LLM</td>
+<td>—</td>
+<td>사실 표 밖 내용 도입 금지 원칙</td>
+</tr>
+<tr>
+<td>렌더링</td>
+<td>파서</td>
+<td><code>scripts/render.py</code></td>
+<td><strong>PDF+HTML 쌍 기본</strong> (<code>--format pdf,html</code>), DOCX 옵션</td>
+</tr>
+</tbody>
+</table>
+<p><strong>현행 <code>allowed-tools</code> (두 스킬 공통)</strong></p>
+<pre><code>Read, Glob, Write, Bash(find *), Bash(ls *),
+Bash(pip install weasyprint *), Bash(pip install markdown *), Bash(pip install python-docx *),
+Bash(python */scripts/render.py *), Bash(python */scripts/flowgen.py *), Bash(python */scripts/extract.py *),
+Bash(python3 */scripts/render.py *), Bash(python3 */scripts/flowgen.py *), Bash(python3 */scripts/extract.py *),
+Bash(pip3 install weasyprint *), Bash(pip3 install markdown *), Bash(pip3 install python-docx *)
+</code></pre>
+<ul>
+<li><code>python3</code>/<code>pip3</code> 변형은 macOS(스톡 환경에 <code>python</code> 부재) 대응.</li>
+<li>여전히 임의 Python 실행은 사전 승인되지 않음 — 동봉 스크립트 3종만 허용.</li>
+</ul>
+<p><strong>대형 코드베이스 분할 모드</strong></p>
+<ul>
+<li>Step 0에서 소스 30개 초과 판정 시, 모듈 단위로 서브에이전트에 extract.py 실행을
+  위임(격리 컨텍스트, 사실 표만 회수) 후 병합. 공식 sub-agents/large-codebases 패턴.</li>
+</ul>
+<p><strong>문서 목차 확장</strong></p>
+<ul>
+<li>에러/메시지 카탈로그(문구 원문 보존), 상태 관리 &amp; 데이터 흐름, 외부 연동 인벤토리,
+  이벤트/트래킹 명세(KPI 근거 연결), As-Is 스냅샷(커밋 해시 기준선), 추적성 매트릭스.</li>
+</ul>
+<p><strong>플랫폼 안내 (README·SKILL.md 4-C)</strong></p>
+<ul>
+<li>Windows PDF: MSYS2 + <code>pacman -S mingw-w64-ucrt-x86_64-pango</code> (WeasyPrint 공식 권장),
+  실패 시 <code>--format docx,html</code> 폴백. macOS: <code>brew install weasyprint</code>.</li>
+</ul>
+<p><strong>공유 사본 관리</strong></p>
+<ul>
+<li><code>reference.md</code> + <code>scripts/</code> 3종은 두 스킬에 동일 사본 — <code>tools/check-sync.sh</code>로 검증.</li>
+</ul>
 <hr />
 <h3 id="_1">출처</h3>
 <ul>

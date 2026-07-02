@@ -19,14 +19,18 @@ codebase to get a **PRD (why/what) + policy spec (how)** set.
 
 ## What a "skill" is here (and why it's portable)
 
-Each skill is just two things:
+Each skill is a `SKILL.md` instructions file plus three plain local Python scripts:
 
-1. **`SKILL.md`** — a Markdown instructions file (YAML frontmatter + procedure).
-2. **`scripts/render.py`** — a plain local Python script that turns Markdown into PDF/DOCX/HTML.
+1. **`SKILL.md`** — the procedure (YAML frontmatter + Markdown), following a hybrid principle:
+   *parsers extract the facts, the LLM writes only the interpretation*.
+2. **`scripts/extract.py`** — deterministic fact extractor (routes, APIs, messages, state,
+   integrations, snapshot — same code always yields the same fact tables).
+3. **`scripts/flowgen.py`** — user-flow SVG generator (renders in both HTML and PDF).
+4. **`scripts/render.py`** — Markdown → PDF+HTML pair (or DOCX) renderer.
 
 That means the skill is **natively** a Claude Code Agent Skill, but the same `SKILL.md`
-body works as a *custom prompt / custom command / rules file* in other AI tools, and
-`render.py` runs from any shell. The setup recipes below show how to register it in each tool.
+body works as a *custom prompt / custom command / rules file* in other AI tools, and the
+scripts run from any shell. The setup recipes below show how to register it in each tool.
 
 ### Dependencies (for document rendering)
 
@@ -219,8 +223,9 @@ Static analysis is honest about its limits:
 │   └── check-sync.sh        # verifies the shared-file copies are identical
 └── examples/
     ├── mock-shop/           # demo mock e-commerce app (React Router)
-    ├── reverse-prd-output/  # sample PRD from mock-shop (HTML)
-    └── review-output/       # sample review report (HTML)
+    ├── reverse-prd-output/  # sample PRD from mock-shop (PDF+HTML pair, body md, flow JSON/SVG)
+    ├── review-output/       # this review report rendered as a PDF+HTML pair
+    └── hybrid-demo/         # hybrid-extraction proof of concept (determinism demo)
 ```
 
 > `reference.md` and `scripts/render.py` are kept as **identical copies** in both skills (a
