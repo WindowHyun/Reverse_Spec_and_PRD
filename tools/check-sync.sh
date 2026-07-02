@@ -10,6 +10,7 @@ SHARED_FILES=(
   "reference.md"
   "scripts/render.py"
   "scripts/flowgen.py"
+  "scripts/extract.py"
 )
 
 status=0

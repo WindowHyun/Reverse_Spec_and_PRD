@@ -178,11 +178,17 @@ swaps the PDF for Word.
 
 ## How it works
 
-1. **Phase 1 — Parse:** extract nav/routes, components, conditionals/validation/auth/API,
-   and screen transitions (rules in [`reference.md`](reverse-prd/reference.md)).
-2. **Phase 2 — Interpret:** infer screen flow / purpose / policy or requirements.
-3. **Phase 3 — Compose:** lay content into the policy-spec or PRD outline.
-4. **Phase 4 — Render:** `scripts/render.py` converts Markdown → PDF/DOCX/HTML.
+1. **Phase 1 — Parse (deterministic):** `scripts/extract.py` extracts facts — routes,
+   components, API calls, constants, rules, transitions, user-facing strings, state usage,
+   integrations/tracking, and an as-is snapshot (rules in
+   [`reference.md`](reverse-prd/reference.md)). Same code → same facts, every run.
+   Codebases over ~30 source files are split into modules and extracted via subagents.
+2. **Phase 2 — Interpret (LLM):** infer flow / purpose / policy or requirements —
+   grounded strictly in the extracted fact tables.
+3. **Phase 3 — Compose:** lay content into the policy-spec or PRD outline;
+   `scripts/flowgen.py` renders the user-flow SVG (visible in both HTML and PDF).
+4. **Phase 4 — Render:** `scripts/render.py` converts Markdown → a **PDF + HTML pair**
+   (or DOCX).
 
 ### Accuracy principles
 
@@ -202,11 +208,11 @@ Static analysis is honest about its limits:
 ├── reverse-spec/            # reverse policy-spec skill
 │   ├── SKILL.md
 │   ├── reference.md         # shared code-parsing rules
-│   └── scripts/render.py    # Markdown → PDF/DOCX/HTML renderer
+│   └── scripts/             # extract.py (facts) · flowgen.py (flow SVG) · render.py (PDF/HTML/DOCX)
 ├── reverse-prd/             # reverse PRD skill (same structure)
 │   ├── SKILL.md
 │   ├── reference.md
-│   └── scripts/render.py
+│   └── scripts/
 ├── docs/
 │   └── skill-mcp-review.md  # official-docs-based Skill/MCP compliance review
 ├── tools/

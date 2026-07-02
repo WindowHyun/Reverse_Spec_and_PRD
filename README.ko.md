@@ -175,11 +175,15 @@ PDF는 공유/인쇄용. `--format docx,html`을 지정하면 PDF 대신 Word로
 
 ## 동작 단계
 
-1. **Phase 1 — 파싱:** nav/route, 컴포넌트, 조건·검증·권한·API, 화면 전환 추출
-   (규칙: [`reference.md`](reverse-prd/reference.md)).
-2. **Phase 2 — 해석:** 화면 흐름 / 목적 / 정책·요구사항 추론.
-3. **Phase 3 — 구성:** 정책서 또는 PRD 목차에 배치.
-4. **Phase 4 — 렌더링:** `scripts/render.py`로 Markdown → PDF/DOCX/HTML 변환.
+1. **Phase 1 — 파싱 (결정적):** `scripts/extract.py`가 사실을 추출 — 라우트, 컴포넌트,
+   API, 상수, 규칙, 화면 전환, 사용자 노출 문구, 상태 사용처, 연동/트래킹, As-Is 스냅샷
+   (규칙: [`reference.md`](reverse-prd/reference.md)). 같은 코드 → 항상 같은 사실.
+   소스 약 30개 초과 시 모듈로 나눠 서브에이전트가 병렬 추출.
+2. **Phase 2 — 해석 (LLM):** 화면 흐름 / 목적 / 정책·요구사항 추론 —
+   추출된 사실 표만을 근거로 수행.
+3. **Phase 3 — 구성:** 정책서 또는 PRD 목차에 배치. `scripts/flowgen.py`가
+   유저플로우 SVG 생성 (HTML·PDF 모두에서 보임).
+4. **Phase 4 — 렌더링:** `scripts/render.py`로 Markdown → **PDF + HTML 쌍** (또는 DOCX).
 
 ### 정확성 원칙
 
@@ -199,11 +203,11 @@ PDF는 공유/인쇄용. `--format docx,html`을 지정하면 PDF 대신 Word로
 ├── reverse-spec/            # 역기획 정책서 스킬
 │   ├── SKILL.md
 │   ├── reference.md         # 공통 코드 파싱 규칙
-│   └── scripts/render.py    # Markdown → PDF/DOCX/HTML 렌더러
+│   └── scripts/             # extract.py(사실 추출) · flowgen.py(흐름 SVG) · render.py(PDF/HTML/DOCX)
 ├── reverse-prd/             # 역기획 PRD 스킬 (구조 동일)
 │   ├── SKILL.md
 │   ├── reference.md
-│   └── scripts/render.py
+│   └── scripts/
 ├── docs/
 │   └── skill-mcp-review.md  # 공식 문서 기반 Skill/MCP 준수 리뷰
 ├── tools/

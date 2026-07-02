@@ -9,8 +9,8 @@ allowed-tools: >
   Read, Glob, Write,
   Bash(find *), Bash(ls *),
   Bash(pip install weasyprint *), Bash(pip install markdown *), Bash(pip install python-docx *),
-  Bash(python */scripts/render.py *), Bash(python */scripts/flowgen.py *),
-  Bash(python3 */scripts/render.py *), Bash(python3 */scripts/flowgen.py *),
+  Bash(python */scripts/render.py *), Bash(python */scripts/flowgen.py *), Bash(python */scripts/extract.py *),
+  Bash(python3 */scripts/render.py *), Bash(python3 */scripts/flowgen.py *), Bash(python3 */scripts/extract.py *),
   Bash(pip3 install weasyprint *), Bash(pip3 install markdown *), Bash(pip3 install python-docx *)
 ---
 
@@ -34,9 +34,11 @@ allowed-tools: >
 ```
 
 1. `$ARGUMENTS`에서 파일 경로 또는 디렉토리를 추출한다.
-2. `--format` 플래그로 출력 형식 결정 (기본값: `pdf`)
+2. `--format` 플래그로 출력 형식 결정 (기본값: `pdf,html` 세트)
 3. `--lang` 플래그로 문서 언어 결정 (기본값: `ko`)
 4. 경로가 없으면 현재 디렉토리(`.`)를 대상으로 한다.
+5. **규모 판정**: `find`로 대상 소스 파일 수를 센다. **30개 초과면 Step 1을
+   "분할 모드"로 수행**한다 (Step 1의 분할 모드 절 참조).
 
 파일 탐색 우선순위:
 
@@ -47,17 +49,40 @@ allowed-tools: >
 4순위: src/ 하위 전체 컴포넌트
 ```
 
-### Step 1 — 코드 파싱 & 구조 추출
+### Step 1 — 코드 파싱 & 구조 추출 (파서 우선)
 
-대상 파일을 읽어 **네비게이션/라우트, 컴포넌트/화면, 조건·검증·권한·API, 화면 전환,
-사용자 노출 문구, 상태 관리, 외부 연동/트래킹, As-Is 스냅샷**(1-A~1-H)을 추출한다.
-상세 추출 규칙은 **`${CLAUDE_SKILL_DIR}/reference.md` (공통 코드 파싱 규칙)** 을 따른다.
-결과는 내부 메모로만 정리하고 사용자에게 출력하지 않는다.
+사실 추출은 LLM이 아니라 동봉된 **결정적 추출기**가 담당한다 (같은 코드 → 항상 같은 사실).
 
-> `reverse-spec` / `reverse-prd`가 동일한 파싱 규칙(`reference.md`)을 공유한다.
-> 추출된 원자료의 의미 해석은 Step 2에서 스킬 목적(정책 규칙화)에 맞게 수행한다.
-> 특히 `reference.md`의 **범위·정확성 표기 규칙**(소스 미포함 컴포넌트 → `[정보 없음]`,
-> 민감정보 비포함, 추정 `[추정]` 표기)을 반드시 적용한다.
+```bash
+python ${CLAUDE_SKILL_DIR}/scripts/extract.py <대상경로> --output reverse-spec-output/_facts.md --emit-flow reverse-spec-output/_flow.json
+```
+
+- `_facts.md`: 1-A~1-H 사실 표 (라우트/컴포넌트/API/상수/규칙/전환/문구/상태/연동/스냅샷).
+  **문서의 사실 표(라우트 맵·API·메시지 카탈로그·컴포넌트 범위·As-Is 스냅샷)는
+  이 출력을 그대로 사용**하고 임의로 고치지 않는다.
+- `_flow.json`: 흐름도 스켈레톤 — Step 4-B에서 라벨·점선(`[추정]` 전환)을 보강해 사용.
+- 추출 규칙 정의: `${CLAUDE_SKILL_DIR}/reference.md` (파서가 이 규칙을 구현).
+
+**LLM 보완 원칙**: 파서가 놓친 항목(동적 라우트, 특수 프레임워크 패턴)은 직접 코드를
+Read로 확인해 보완하되, 보완 항목에는 근거 파일을 명시한다. **사실 표에 없는
+화면·API·규칙을 지어내지 않는다.** `reference.md`의 범위·정확성 표기 규칙(소스 미포함
+컴포넌트 → `[정보 없음]`, 민감정보 비포함, 추정 `[추정]`)을 항상 적용한다.
+정책 규칙화(Step 2)는 사실 표의 조건·상수·규칙 행을 근거로 수행한다.
+
+#### 분할 모드 (대형 코드베이스 — 소스 30개 초과)
+
+공식 서브에이전트 패턴(격리 컨텍스트에서 탐색, 요약만 반환)을 사용한다.
+
+1. 대상을 디렉토리/도메인 단위 모듈로 나눈다 (예: `src/pages`, `src/admin`, `src/lib`).
+2. 모듈마다 **서브에이전트(Task 도구)에 위임**: "extract.py를 `<모듈 경로>`에 실행하고
+   `_facts.md` 내용을 그대로 반환하라. 해석하지 말 것." — 각 에이전트는 격리 컨텍스트에서
+   동작하므로 메인 컨텍스트가 오염되지 않는다.
+3. 회수한 모듈별 사실 표를 병합하고(추출기 출력은 결정적이라 병합 시 충돌 없음),
+   Step 2부터는 메인 컨텍스트에서 병합본으로 진행한다.
+4. 문서 1장(Document Overview)에 **"모듈별 분석 범위" 표**를 기록한다: [모듈 | 파일 수 | 추출 통계].
+
+> 근거: 공식 문서 sub-agents("서브에이전트는 자체 컨텍스트에서 작업하고 요약을 반환"),
+> large-codebases 가이드.
 
 ### Step 2 — 의미 분석 (3개 축 동시 수행)
 
@@ -179,8 +204,9 @@ Step 3에서 구성한 정책서 전체 본문(Markdown)을 `Write` 도구로 �
 
 #### 4-B. 화면 흐름 SVG 생성
 
-Step 1-D에서 추출한 화면 전환을 `Write` 도구로 flow JSON에 담고, `flowgen.py`로
-SVG를 생성해 본문의 2.1(흐름도) 위치에 인라인 삽입한다.
+Step 1에서 생성된 `_flow.json` 스켈레톤(노드·보호등급·전환은 파서가 채움)에
+라벨을 사람이 읽을 문구로 다듬고, 코드 근거 없는 전환은 `[추정]` 라벨 + `dashed: true`로
+보강한 뒤, `flowgen.py`로 SVG를 생성해 본문의 2.1(흐름도)에 인라인 삽입한다.
 
 ```bash
 python ${CLAUDE_SKILL_DIR}/scripts/flowgen.py --input reverse-spec-output/_flow.json --output reverse-spec-output/_flow.svg
