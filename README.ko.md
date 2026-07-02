@@ -33,7 +33,17 @@
 pip install weasyprint markdown python-docx
 ```
 
-`--format html` 미리보기는 `markdown`만, PDF는 `weasyprint`, DOCX는 `python-docx`가 필요하다.
+HTML 출력은 `markdown`만, PDF는 `weasyprint`, DOCX는 `python-docx`가 필요하다.
+macOS에서 `python`/`pip`이 없으면 `python3`/`pip3`를 사용한다.
+
+**PDF 플랫폼 안내 (WeasyPrint는 네이티브 Pango 라이브러리가 필요 — pip만으로는 부족):**
+
+- **Windows**: [MSYS2](https://www.msys2.org/) 설치 후 MSYS2 UCRT64 셸에서
+  `pacman -S mingw-w64-ucrt-x86_64-pango` 실행. (WeasyPrint 공식 권장 —
+  [설치 문서](https://doc.courtbouillon.org/weasyprint/stable/first_steps.html) 참조.)
+  어려우면 PDF 대신 `--format docx,html` 사용.
+- **macOS**: `brew install weasyprint` 한 줄 (Pango 자동 포함).
+- **Linux**: 대개 `pip install`만으로 동작. 안 되면 패키지 매니저로 `pango` 설치.
 
 ---
 
@@ -65,8 +75,10 @@ mkdir -p .claude/skills && cp -r reverse-prd reverse-spec .claude/skills/
 Claude 채팅 앱은 커스텀 Skill을 지원하지만, 디스크 폴더가 아니라 **업로드** 방식이다.
 
 ```bash
-# 스킬 폴더를 zip으로 압축 (SKILL.md 포함되어야 함)
+# macOS/Linux — 스킬 폴더를 zip으로 압축 (SKILL.md 포함되어야 함)
 cd reverse-prd && zip -r ../reverse-prd.zip . && cd ..
+# Windows (PowerShell)
+Compress-Archive -Path reverse-prd\* -DestinationPath reverse-prd.zip
 ```
 
 앱에서 **설정 → Capabilities → Skills → Upload skill** 로 ZIP을 선택한다. 코드 실행이
@@ -154,8 +166,10 @@ Agent 패널에서 `/reverse-prd` 로 호출한다. Antigravity에는 **Skills**
 /reverse-spec . --format pdf --lang en
 ```
 
-출력은 `./reverse-prd-output/` (또는 `reverse-spec-output/`)에
-`reverse_prd_YYYYMMDD_HHMMSS.[pdf|docx|html]` 형식으로 생성된다.
+출력은 `./reverse-prd-output/` (또는 `reverse-spec-output/`)에 생성된다.
+**기본적으로 매 실행마다 PDF + HTML 쌍**이 같은 타임스탬프로 함께 만들어진다
+(예: `reverse_prd_….pdf` + `reverse_prd_….html`) — HTML은 브라우저 즉시 확인용,
+PDF는 공유/인쇄용. `--format docx,html`을 지정하면 PDF 대신 Word로 생성된다.
 
 ---
 

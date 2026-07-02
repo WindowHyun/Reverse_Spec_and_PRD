@@ -8,12 +8,12 @@ Claude가 Step 1~3에서 구성한 Markdown 본문을 받아 PDF 또는 DOCX로 
 allowed-tools 를 `Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)` 로 좁힐 수 있다.
 
 사용법:
-  python render.py --input doc.md --format pdf  --title "역기획 PRD" --accent "#1f4e79" --outdir reverse-prd-output
-  python render.py --input doc.md --format docx --title "역기획 정책서" --accent "#2c2c2c" --outdir reverse-spec-output
+  python render.py --input doc.md --title "역기획 PRD" --outdir reverse-prd-output          # PDF+HTML 세트(기본)
+  python render.py --input doc.md --format docx,html --title "역기획 정책서" --outdir out   # DOCX+HTML
 
 옵션:
   --input   구성된 Markdown 본문 파일 경로 (필수)
-  --format  pdf | docx | html        (기본 pdf)
+  --format  쉼표 구분 다중 지정: pdf,html(기본) | docx | html 조합
   --title   문서 머리말/제목          (기본 "역기획 문서")
   --accent  강조색 hex                (기본 #1f4e79)
   --outdir  출력 디렉토리             (기본 reverse-spec-output)
@@ -199,7 +199,8 @@ def render_docx(md_text: str, out_path: pathlib.Path, title: str) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="역기획 문서 렌더러 (pdf/docx/html)")
     ap.add_argument("--input", required=True, help="구성된 Markdown 본문 파일")
-    ap.add_argument("--format", default="pdf", choices=["pdf", "docx", "html"])
+    ap.add_argument("--format", default="pdf,html",
+                    help="쉼표 구분 다중 지정 가능: pdf,html(기본) / docx,html / pdf 등")
     ap.add_argument("--title", default="역기획 문서")
     ap.add_argument("--accent", default="#1f4e79")
     ap.add_argument("--outdir", default="reverse-spec-output")
@@ -207,21 +208,26 @@ def main() -> int:
     ap.add_argument("--lang", default="ko", help="HTML/PDF lang 속성 (ko|en 등)")
     args = ap.parse_args()
 
+    formats = [f.strip() for f in args.format.split(",") if f.strip()]
+    invalid = [f for f in formats if f not in ("pdf", "docx", "html")]
+    if invalid:
+        print(f"❌ 지원하지 않는 형식: {', '.join(invalid)} (pdf|docx|html)", file=sys.stderr)
+        return 1
+
     md_text = pathlib.Path(args.input).read_text(encoding="utf-8")
     out_dir = pathlib.Path(args.outdir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    ext = args.format
-    out_path = out_dir / f"{args.name}_{ts}.{ext}"
 
-    if args.format == "pdf":
-        render_pdf(md_text, out_path, args.title, args.accent, args.lang)
-    elif args.format == "docx":
-        render_docx(md_text, out_path, args.title)
-    else:
-        render_html(md_text, out_path, args.title, args.accent, args.lang)
-
-    print(f"✅ {args.format.upper()} 생성 완료: {out_path}")
+    for fmt in formats:  # 같은 타임스탬프로 세트 생성 (예: _104205.pdf + _104205.html)
+        out_path = out_dir / f"{args.name}_{ts}.{fmt}"
+        if fmt == "pdf":
+            render_pdf(md_text, out_path, args.title, args.accent, args.lang)
+        elif fmt == "docx":
+            render_docx(md_text, out_path, args.title)
+        else:
+            render_html(md_text, out_path, args.title, args.accent, args.lang)
+        print(f"✅ {fmt.upper()} 생성 완료: {out_path}")
     return 0
 
 

@@ -34,7 +34,17 @@ body works as a *custom prompt / custom command / rules file* in other AI tools,
 pip install weasyprint markdown python-docx
 ```
 
-`--format html` preview needs only `markdown`; PDF needs `weasyprint`; DOCX needs `python-docx`.
+HTML output needs only `markdown`; PDF needs `weasyprint`; DOCX needs `python-docx`.
+On macOS, use `python3`/`pip3` if `python`/`pip` don't exist.
+
+**Platform note for PDF (WeasyPrint needs the native Pango library — pip alone is not enough):**
+
+- **Windows**: install [MSYS2](https://www.msys2.org/), then in the MSYS2 UCRT64 shell run
+  `pacman -S mingw-w64-ucrt-x86_64-pango`. (Official WeasyPrint guidance — see
+  [installation docs](https://doc.courtbouillon.org/weasyprint/stable/first_steps.html).)
+  If that's not an option, use `--format docx,html` instead of PDF.
+- **macOS**: `brew install weasyprint` (pulls in Pango automatically).
+- **Linux**: usually works after `pip install`; install `pango` via your package manager if not.
 
 ---
 
@@ -66,8 +76,10 @@ There is no separate "Claude CLI" product: the terminal tool is **Claude Code**,
 The Claude chat app supports custom Skills, but via **upload**, not a folder on disk:
 
 ```bash
-# zip the skill folder (it must contain SKILL.md)
+# macOS/Linux — zip the skill folder (it must contain SKILL.md)
 cd reverse-prd && zip -r ../reverse-prd.zip . && cd ..
+# Windows (PowerShell)
+Compress-Archive -Path reverse-prd\* -DestinationPath reverse-prd.zip
 ```
 
 Then in the app: **Settings → Capabilities → Skills → Upload skill**, and select the ZIP.
@@ -157,8 +169,10 @@ Docs: <https://antigravity.google/docs/rules-workflows>
 /reverse-spec . --format pdf --lang en
 ```
 
-Output lands in `./reverse-prd-output/` (or `reverse-spec-output/`) as
-`reverse_prd_YYYYMMDD_HHMMSS.[pdf|docx|html]`.
+Output lands in `./reverse-prd-output/` (or `reverse-spec-output/`). **Every run produces a
+PDF + HTML pair by default** (same timestamp, e.g. `reverse_prd_….pdf` + `reverse_prd_….html`) —
+the HTML opens instantly in a browser, the PDF is for sharing/printing. `--format docx,html`
+swaps the PDF for Word.
 
 ---
 

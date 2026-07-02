@@ -10,7 +10,9 @@ allowed-tools: >
   Read, Glob, Write,
   Bash(find *), Bash(ls *),
   Bash(pip install weasyprint *), Bash(pip install markdown *), Bash(pip install python-docx *),
-  Bash(python */scripts/render.py *), Bash(python */scripts/flowgen.py *)
+  Bash(python */scripts/render.py *), Bash(python */scripts/flowgen.py *),
+  Bash(python3 */scripts/render.py *), Bash(python3 */scripts/flowgen.py *),
+  Bash(pip3 install weasyprint *), Bash(pip3 install markdown *), Bash(pip3 install python-docx *)
 ---
 
 # reverse-prd — 코드 역기획 PRD 생성기
@@ -219,20 +221,29 @@ python ${CLAUDE_SKILL_DIR}/scripts/flowgen.py --input reverse-prd-output/_flow.j
 pip install weasyprint markdown python-docx --quiet
 ```
 
-> 환경에 이미 설치돼 있으면 생략한다. `--format html` 미리보기는 weasyprint 없이도 가능하다.
+> 환경에 이미 설치돼 있으면 생략한다. HTML 출력은 weasyprint 없이도 가능하다.
+> macOS에서 `python`/`pip`이 없으면 `python3`/`pip3`를 사용한다.
+>
+> **플랫폼별 PDF 엔진(weasyprint) 요구사항** — pip만으로는 부족할 수 있다:
+> - **Windows**: Pango 네이티브 라이브러리 필요. 공식 권장은 MSYS2 설치 후
+>   `pacman -S mingw-w64-ucrt-x86_64-pango`. 설치가 어려우면 `--format docx,html`로 대체.
+> - **macOS**: `brew install weasyprint` 한 줄로 해결.
+> - PDF 생성 실패 시 사용자에게 위 안내를 전하고 `--format html`(또는 docx,html)로 계속 진행한다.
 
 #### 4-D. 렌더링 실행
 
 ```bash
-python ${CLAUDE_SKILL_DIR}/scripts/render.py --input reverse-prd-output/_prd_body.md --format pdf --title "역기획 PRD" --accent "#1f4e79" --outdir reverse-prd-output --name reverse_prd
+python ${CLAUDE_SKILL_DIR}/scripts/render.py --input reverse-prd-output/_prd_body.md --title "역기획 PRD" --accent "#1f4e79" --outdir reverse-prd-output --name reverse_prd
 ```
 
 > 명령은 **한 줄로 실행**한다 (백슬래시 줄바꿈은 allowed-tools 패턴 매칭을 깨뜨릴 수 있다).
 
-- `--format` : `pdf`(기본) / `docx` / `html`(미리보기)
+- **기본 출력은 PDF + HTML 세트**다 (`--format pdf,html` 기본값, 같은 타임스탬프로 쌍 생성).
+  사용자가 형식을 지정하면 그에 맞춰 쉼표 조합: `--format docx,html` 등.
+  단, 어떤 형식을 요청받든 **HTML은 항상 함께 생성**한다 (브라우저 즉시 확인용).
 - 영문 문서 요청 시 `--lang en --title "Reverse-engineered PRD"` 를 함께 지정한다
   (`--lang`은 HTML/PDF의 `lang` 속성을 결정한다).
-- 출력 파일: `reverse-prd-output/reverse_prd_YYYYMMDD_HHMMSS.[pdf|docx|html]`
+- 출력 파일: `reverse-prd-output/reverse_prd_YYYYMMDD_HHMMSS.pdf` + 동일 이름 `.html`
 
 > `render.py` 는 GFM 파이프 테이블 · 헤딩 · 코드블록 · 불릿 · 인용을 PDF/DOCX 모두에서
 > 처리한다. 따라서 사용자 스토리표·요구사항표는 본문 Markdown에 표로 작성하면 그대로 변환된다.
@@ -255,7 +266,7 @@ python ${CLAUDE_SKILL_DIR}/scripts/render.py --input reverse-prd-output/_prd_bod
 ⚠️  추정 항목         : N개 ([추정] 표기됨)
 ❓ 정보 부족 항목     : N개 (별도 확인 필요)
 
-📄 출력 파일: ./reverse-prd-output/reverse_prd_YYYYMMDD_HHMMSS.pdf
+📄 출력 파일: ./reverse-prd-output/reverse_prd_YYYYMMDD_HHMMSS.pdf (+ 동일 이름 .html)
 
 교차 검증이 꼭 필요한 항목:
   1. [배경/목표] — 코드에 의도가 없어 추정으로 작성됨

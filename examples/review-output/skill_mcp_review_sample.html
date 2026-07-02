@@ -5,20 +5,31 @@
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&display=swap');
   body { font-family: 'Noto Sans KR', sans-serif; font-size: 11pt; line-height: 1.8;
-          color: #1a1a1a; max-width: 860px; margin: 0 auto; padding: 32px; background:#fff; }
-  h1 { font-size: 20pt; border-bottom: 2px solid #1f4e79; padding-bottom: 8px; margin-top: 40px; color: #1f4e79; }
-  h2 { font-size: 15pt; border-left: 4px solid #2e75b6; padding-left: 10px; margin-top: 30px; }
+          color: #1a1a1a; margin: 0; padding: 0; }
+  h1 { font-size: 20pt; border-bottom: 2px solid #1f4e79; padding-bottom: 8px;
+        margin-top: 40px; color: #1f4e79; }
+  h2 { font-size: 15pt; border-left: 4px solid #1f4e79; padding-left: 10px; margin-top: 30px; }
   h3 { font-size: 12pt; color: #444; margin-top: 20px; }
   table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 10pt; }
   th { background: #1f4e79; color: white; padding: 8px 12px; text-align: left; }
   td { border: 1px solid #ccc; padding: 7px 12px; vertical-align: top; }
-  tr:nth-child(even) td { background: #f4f8fc; }
+  tr:nth-child(even) td { background: #f5f7fa; }
   code { background: #eef2f7; padding: 2px 5px; border-radius: 3px; font-size: 9.5pt; }
   pre { background: #1e1e1e; color: #d4d4d4; padding: 14px; border-radius: 6px;
          font-size: 9pt; overflow-x: auto; }
   pre code { background: transparent; color: inherit; padding: 0; }
-  blockquote { border-left: 4px solid #2e75b6; background:#f4f8fc; margin:16px 0; padding:8px 16px; color:#34495e; }
-  a { color: #1f4e79; }
+  blockquote { border-left: 4px solid #c47a00; background:#fff8ec; margin:16px 0;
+               padding:8px 16px; color:#7a5200; }
+  /* 브라우저 화면 전용 여백 — weasyprint(PDF)는 print 매체라 무시하고 @page 여백을 쓴다 */
+  @media screen {
+    body { max-width: 860px; margin: 0 auto; padding: 32px 24px; }
+  }
+  @page {
+    size: A4;
+    margin: 20mm 18mm 20mm 20mm;
+    @top-center { content: "Skill/MCP 리뷰 리포트"; font-size: 9pt; color: #888; }
+    @bottom-right { content: counter(page) " / " counter(pages); font-size: 9pt; color: #888; }
+  }
 </style>
 </head>
 <body>
@@ -131,7 +142,10 @@ README에 설치 경로(예: <code>cp -r reverse-prd ~/.claude/skills/</code>)�
 <p><strong>권고 (R-2) — ✅ 적용됨:</strong>
 - 의도된 동작임을 SKILL.md 또는 README에 명시 (사용자가 권한 범위를 인지하도록).
 - 가능하면 범위를 좁힌다. 예: 생성 스크립트를 <code>scripts/</code>로 분리하고
-  <code>Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)</code> 형태로 한정 (아래 R-3 참조).
+  <code>Bash(python */scripts/render.py *)</code> 형태로 한정 (아래 R-3 참조).
+  <strong>주의:</strong> <code>${CLAUDE_SKILL_DIR}</code> 치환은 스킬 <strong>본문에서만</strong> 동작하며 프론트매터
+  <code>allowed-tools</code>에서는 확장되지 않는다(리터럴 문자열로 취급되어 어떤 명령과도 매칭 안 됨).
+  따라서 허가 패턴에는 경로 와일드카드를 사용해야 한다.
 - <code>pip install</code>은 사전 설치를 전제하면 제거 가능 (런타임 설치 회피).</p>
 <hr />
 <h2 id="5-mcp">5. MCP 리뷰</h2>
@@ -157,7 +171,8 @@ README에 설치 경로(예: <code>cp -r reverse-prd ~/.claude/skills/</code>)�
 "supporting files" 구조를 권장한다. 분리 시 이점:</p>
 <ul>
 <li>SKILL.md가 가벼워져 모델이 지침을 더 잘 따른다.</li>
-<li><code>allowed-tools</code>를 <code>Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)</code>로 좁혀 R-2 보안 권고도 충족.</li>
+<li><code>allowed-tools</code>를 <code>Bash(python */scripts/render.py *)</code>로 좁혀 R-2 보안 권고도 충족.
+  (프론트매터는 <code>${CLAUDE_SKILL_DIR}</code>를 확장하지 않으므로 경로 와일드카드 패턴 사용.)</li>
 </ul>
 <p>예시 구조:</p>
 <pre><code>reverse-prd/
@@ -190,7 +205,7 @@ README에 설치 경로(예: <code>cp -r reverse-prd ~/.claude/skills/</code>)�
 <tr>
 <td>R-2</td>
 <td>✅ 적용됨</td>
-<td><code>allowed-tools</code>를 <code>Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)</code> 로 축소, <code>pip install</code>도 패키지 한정</td>
+<td><code>allowed-tools</code>를 <code>Bash(python */scripts/render.py *)</code> 로 축소, <code>pip install</code>도 패키지 한정</td>
 <td>중</td>
 </tr>
 <tr>
@@ -224,6 +239,11 @@ README에 설치 경로(예: <code>cp -r reverse-prd ~/.claude/skills/</code>)�
 <code>reference.md</code>(공통 파싱)와 <code>scripts/render.py</code>(공통 렌더러)를 공유하고,
 <code>allowed-tools</code>는 스크립트 경로로 한정됨. R-1은 저장소 <code>README.md</code>로 충족.
 R-4(MCP)는 현 기능상 불필요하여 정보성으로 유지.</p>
+<p><strong>정정 (2026-07-02):</strong> 최초 R-2 적용 시 사용한 <code>Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)</code>
+패턴은 프론트매터에서 변수가 확장되지 않아 <strong>어떤 명령과도 매칭되지 않는 사문</strong>이었다
+(fail-closed — 보안 문제는 아니나 사전 승인 효과 없음). 공식 permissions 문서의
+와일드카드 시맨틱(<code>*</code>는 공백 포함 임의 문자열 매칭)에 따라
+<code>Bash(python */scripts/render.py *)</code> 로 교체하여 실제로 매칭되는 최소 패턴으로 정정함.</p>
 </blockquote>
 <hr />
 <h3 id="_1">출처</h3>
