@@ -65,7 +65,10 @@ README에 설치 경로(예: `cp -r reverse-prd ~/.claude/skills/`)를 명시하
 **권고 (R-2) — ✅ 적용됨:**
 - 의도된 동작임을 SKILL.md 또는 README에 명시 (사용자가 권한 범위를 인지하도록).
 - 가능하면 범위를 좁힌다. 예: 생성 스크립트를 `scripts/`로 분리하고
-  `Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)` 형태로 한정 (아래 R-3 참조).
+  `Bash(python */scripts/render.py *)` 형태로 한정 (아래 R-3 참조).
+  **주의:** `${CLAUDE_SKILL_DIR}` 치환은 스킬 **본문에서만** 동작하며 프론트매터
+  `allowed-tools`에서는 확장되지 않는다(리터럴 문자열로 취급되어 어떤 명령과도 매칭 안 됨).
+  따라서 허가 패턴에는 경로 와일드카드를 사용해야 한다.
 - `pip install`은 사전 설치를 전제하면 제거 가능 (런타임 설치 회피).
 
 ---
@@ -101,7 +104,8 @@ allowed-tools: >
 "supporting files" 구조를 권장한다. 분리 시 이점:
 
 - SKILL.md가 가벼워져 모델이 지침을 더 잘 따른다.
-- `allowed-tools`를 `Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)`로 좁혀 R-2 보안 권고도 충족.
+- `allowed-tools`를 `Bash(python */scripts/render.py *)`로 좁혀 R-2 보안 권고도 충족.
+  (프론트매터는 `${CLAUDE_SKILL_DIR}`를 확장하지 않으므로 경로 와일드카드 패턴 사용.)
 
 예시 구조:
 
@@ -124,7 +128,7 @@ reverse-prd/
 | ID | 구분 | 내용 | 우선순위 |
 |----|------|------|----------|
 | R-1 | ✅ 적용됨 | README에 설치 경로(`~/.claude/skills/` · `.claude/skills/`)·사용법·구조 명시 | 중 |
-| R-2 | ✅ 적용됨 | `allowed-tools`를 `Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)` 로 축소, `pip install`도 패키지 한정 | 중 |
+| R-2 | ✅ 적용됨 | `allowed-tools`를 `Bash(python */scripts/render.py *)` 로 축소, `pip install`도 패키지 한정 | 중 |
 | R-3 | ✅ 적용됨 | 인라인 Python을 `scripts/render.py`로 분리, `${CLAUDE_SKILL_DIR}` 참조로 호출 | 중 |
 | R-4 | 정보 | MCP는 외부 게시 확장 시에만 `mcp__server__tool` 표기로 도입 | 하 |
 | R-5 | ✅ 적용됨 | Step 1 공통 파싱 로직을 `reference.md`로 분리, 양쪽 SKILL.md에서 `${CLAUDE_SKILL_DIR}/reference.md` 참조 | 하 |
@@ -134,6 +138,12 @@ reverse-prd/
 > `reference.md`(공통 파싱)와 `scripts/render.py`(공통 렌더러)를 공유하고,
 > `allowed-tools`는 스크립트 경로로 한정됨. R-1은 저장소 `README.md`로 충족.
 > R-4(MCP)는 현 기능상 불필요하여 정보성으로 유지.
+>
+> **정정 (2026-07-02):** 최초 R-2 적용 시 사용한 `Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)`
+> 패턴은 프론트매터에서 변수가 확장되지 않아 **어떤 명령과도 매칭되지 않는 사문**이었다
+> (fail-closed — 보안 문제는 아니나 사전 승인 효과 없음). 공식 permissions 문서의
+> 와일드카드 시맨틱(`*`는 공백 포함 임의 문자열 매칭)에 따라
+> `Bash(python */scripts/render.py *)` 로 교체하여 실제로 매칭되는 최소 패턴으로 정정함.
 
 ---
 

@@ -195,6 +195,8 @@ Static analysis is honest about its limits:
 │   └── scripts/render.py
 ├── docs/
 │   └── skill-mcp-review.md  # official-docs-based Skill/MCP compliance review
+├── tools/
+│   └── check-sync.sh        # verifies the shared-file copies are identical
 └── examples/
     ├── mock-shop/           # demo mock e-commerce app (React Router)
     ├── reverse-prd-output/  # sample PRD from mock-shop (HTML)
@@ -203,7 +205,7 @@ Static analysis is honest about its limits:
 
 > `reference.md` and `scripts/render.py` are kept as **identical copies** in both skills (a
 > skill can only reference files inside its own directory via `${CLAUDE_SKILL_DIR}`). Edit one,
-> copy to the other.
+> copy to the other, then verify with `bash tools/check-sync.sh` before committing.
 
 ---
 

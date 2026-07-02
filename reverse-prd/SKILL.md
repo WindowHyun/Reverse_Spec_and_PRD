@@ -10,7 +10,7 @@ allowed-tools: >
   Read, Glob, Write,
   Bash(find *), Bash(ls *),
   Bash(pip install weasyprint *), Bash(pip install markdown *), Bash(pip install python-docx *),
-  Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)
+  Bash(python */scripts/render.py *)
 ---
 
 # reverse-prd — 코드 역기획 PRD 생성기
@@ -170,8 +170,10 @@ Step 1 추출 결과를 PRD 관점으로 재해석한다.
 ### Step 4 — 출력 파일 생성
 
 문서 렌더링은 인라인 코드가 아니라 스킬에 동봉된 **`scripts/render.py`** 로 수행한다.
-(Markdown → PDF / DOCX / HTML 변환을 한 스크립트가 처리하며, `allowed-tools` 가
-`Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)` 로 한정되어 있어 임의 코드 실행 권한을 주지 않는다.)
+(Markdown → PDF / DOCX / HTML 변환을 한 스크립트가 처리한다. `allowed-tools` 는
+`Bash(python */scripts/render.py *)` 로 한정되어 있어 임의 Python 실행이 아닌
+render.py 호출만 사전 승인된다 — `${CLAUDE_SKILL_DIR}` 치환은 본문에서만 동작하고
+프론트매터에서는 확장되지 않으므로 경로 와일드카드 패턴을 사용한다.)
 
 #### 4-A. 본문을 Markdown 파일로 저장
 
@@ -189,17 +191,14 @@ pip install weasyprint markdown python-docx --quiet
 #### 4-C. 렌더링 실행
 
 ```bash
-python ${CLAUDE_SKILL_DIR}/scripts/render.py \
-  --input  reverse-prd-output/_prd_body.md \
-  --format pdf \
-  --title  "역기획 PRD" \
-  --accent "#1f4e79" \
-  --outdir reverse-prd-output \
-  --name   reverse_prd
+python ${CLAUDE_SKILL_DIR}/scripts/render.py --input reverse-prd-output/_prd_body.md --format pdf --title "역기획 PRD" --accent "#1f4e79" --outdir reverse-prd-output --name reverse_prd
 ```
 
+> 명령은 **한 줄로 실행**한다 (백슬래시 줄바꿈은 allowed-tools 패턴 매칭을 깨뜨릴 수 있다).
+
 - `--format` : `pdf`(기본) / `docx` / `html`(미리보기)
-- `--lang en` 요청 시에도 동일 스크립트를 쓰되 `--title "Reverse-engineered PRD"` 로 바꾼다.
+- 영문 문서 요청 시 `--lang en --title "Reverse-engineered PRD"` 를 함께 지정한다
+  (`--lang`은 HTML/PDF의 `lang` 속성을 결정한다).
 - 출력 파일: `reverse-prd-output/reverse_prd_YYYYMMDD_HHMMSS.[pdf|docx|html]`
 
 > `render.py` 는 GFM 파이프 테이블 · 헤딩 · 코드블록 · 불릿 · 인용을 PDF/DOCX 모두에서

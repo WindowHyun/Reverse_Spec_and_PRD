@@ -192,6 +192,8 @@ Agent 패널에서 `/reverse-prd` 로 호출한다. Antigravity에는 **Skills**
 │   └── scripts/render.py
 ├── docs/
 │   └── skill-mcp-review.md  # 공식 문서 기반 Skill/MCP 준수 리뷰
+├── tools/
+│   └── check-sync.sh        # 공유 파일 사본 일치 검증 스크립트
 └── examples/
     ├── mock-shop/           # 데모용 목 e-커머스 앱 (React Router)
     ├── reverse-prd-output/  # mock-shop 분석 PRD 샘플 (HTML)
@@ -199,7 +201,8 @@ Agent 패널에서 `/reverse-prd` 로 호출한다. Antigravity에는 **Skills**
 ```
 
 > `reference.md`와 `scripts/render.py`는 두 스킬에서 **동일 사본**으로 유지된다(스킬은
-> `${CLAUDE_SKILL_DIR}`로 자기 디렉토리 내부 파일만 참조하므로). 한쪽 수정 시 다른 쪽에도 복사.
+> `${CLAUDE_SKILL_DIR}`로 자기 디렉토리 내부 파일만 참조하므로). 한쪽 수정 시 다른 쪽에도
+> 복사하고, 커밋 전 `bash tools/check-sync.sh` 로 일치 여부를 검증한다.
 
 ---
 

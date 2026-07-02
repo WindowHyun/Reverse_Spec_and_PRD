@@ -18,6 +18,7 @@ allowed-tools 를 `Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)` 로 좁힐 수 �
   --accent  강조색 hex                (기본 #1f4e79)
   --outdir  출력 디렉토리             (기본 reverse-spec-output)
   --name    파일명 접두어             (기본 reverse_spec)
+  --lang    HTML/PDF lang 속성        (기본 ko; 영문 문서는 en)
 """
 import argparse
 import datetime
@@ -26,11 +27,11 @@ import re
 import sys
 
 
-def build_html(md_text: str, title: str, accent: str) -> str:
+def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
     import markdown
     body = markdown.markdown(md_text, extensions=["tables", "toc", "fenced_code"])
     return f"""<!DOCTYPE html>
-<html lang="ko">
+<html lang="{lang}">
 <head>
 <meta charset="UTF-8">
 <style>
@@ -65,14 +66,14 @@ def build_html(md_text: str, title: str, accent: str) -> str:
 </html>"""
 
 
-def render_pdf(md_text: str, out_path: pathlib.Path, title: str, accent: str) -> None:
+def render_pdf(md_text: str, out_path: pathlib.Path, title: str, accent: str, lang: str) -> None:
     from weasyprint import HTML
-    HTML(string=build_html(md_text, title, accent)).write_pdf(str(out_path))
+    HTML(string=build_html(md_text, title, accent, lang)).write_pdf(str(out_path))
 
 
-def render_html(md_text: str, out_path: pathlib.Path, title: str, accent: str) -> None:
+def render_html(md_text: str, out_path: pathlib.Path, title: str, accent: str, lang: str) -> None:
     # 미리보기/디버그용 정적 HTML (A4 @page 규칙은 브라우저에서 무시됨)
-    out_path.write_text(build_html(md_text, title, accent), encoding="utf-8")
+    out_path.write_text(build_html(md_text, title, accent, lang), encoding="utf-8")
 
 
 _INLINE = re.compile(r"\*\*(.+?)\*\*|`(.+?)`")
@@ -88,11 +89,18 @@ def render_docx(md_text: str, out_path: pathlib.Path, title: str) -> None:
     from docx.shared import Cm
 
     doc = Document()
+    doc.core_properties.title = title
     sec = doc.sections[0]
     sec.top_margin = Cm(2.0)
     sec.bottom_margin = Cm(2.0)
     sec.left_margin = Cm(2.5)
     sec.right_margin = Cm(2.0)
+
+    # PDF의 @top-center 머리말과 동일하게 페이지 헤더에 문서 제목 표시
+    header_p = sec.header.paragraphs[0]
+    header_p.text = title
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    header_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     lines = md_text.splitlines()
     i = 0
@@ -192,6 +200,7 @@ def main() -> int:
     ap.add_argument("--accent", default="#1f4e79")
     ap.add_argument("--outdir", default="reverse-spec-output")
     ap.add_argument("--name", default="reverse_spec")
+    ap.add_argument("--lang", default="ko", help="HTML/PDF lang 속성 (ko|en 등)")
     args = ap.parse_args()
 
     md_text = pathlib.Path(args.input).read_text(encoding="utf-8")
@@ -202,11 +211,11 @@ def main() -> int:
     out_path = out_dir / f"{args.name}_{ts}.{ext}"
 
     if args.format == "pdf":
-        render_pdf(md_text, out_path, args.title, args.accent)
+        render_pdf(md_text, out_path, args.title, args.accent, args.lang)
     elif args.format == "docx":
         render_docx(md_text, out_path, args.title)
     else:
-        render_html(md_text, out_path, args.title, args.accent)
+        render_html(md_text, out_path, args.title, args.accent, args.lang)
 
     print(f"✅ {args.format.upper()} 생성 완료: {out_path}")
     return 0
