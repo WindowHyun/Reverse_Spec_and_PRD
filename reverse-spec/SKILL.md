@@ -9,7 +9,7 @@ allowed-tools: >
   Read, Glob, Write,
   Bash(find *), Bash(ls *),
   Bash(pip install weasyprint *), Bash(pip install markdown *), Bash(pip install python-docx *),
-  Bash(python */scripts/render.py *)
+  Bash(python */scripts/render.py *), Bash(python */scripts/flowgen.py *)
 ---
 
 # reverse-spec — 코드 역기획 정책서 생성기
@@ -100,7 +100,8 @@ Step 1 추출 결과를 기반으로 다음 3가지를 병렬 추론한다.
 
 2. Scope & Product Policy
    2.1 흐름 (흐름도)
-       - 전체 화면 흐름 다이어그램 (텍스트 기반 ASCII 또는 Mermaid)
+       - 전체 화면 흐름 SVG 다이어그램 (scripts/flowgen.py로 생성, 아래 Step 4-B)
+       - 노드 색으로 보호 등급 구분(공개/🔒로그인/🔒admin), 점선은 조건부/추정 전환
    2.2 작업 내용
        - 각 화면별 주요 기능 목록
    2.3 공통 정책
@@ -174,7 +175,21 @@ render.py 호출만 사전 승인된다 — `${CLAUDE_SKILL_DIR}` 치환은 본�
 Step 3에서 구성한 정책서 전체 본문(Markdown)을 `Write` 도구로 임시 파일에 저장한다.
 예: `reverse-spec-output/_spec_body.md`
 
-#### 4-B. 의존성 설치 (최초 1회)
+#### 4-B. 화면 흐름 SVG 생성
+
+Step 1-D에서 추출한 화면 전환을 `Write` 도구로 flow JSON에 담고, `flowgen.py`로
+SVG를 생성해 본문의 2.1(흐름도) 위치에 인라인 삽입한다.
+
+```bash
+python ${CLAUDE_SKILL_DIR}/scripts/flowgen.py --input reverse-spec-output/_flow.json --output reverse-spec-output/_flow.svg
+```
+
+- JSON 형식: `nodes[{id,label,guard: public|login|admin}]`, `edges[{from,to,label,dashed?}]`, `entry[]`
+  (상세는 flowgen.py 상단 주석 참조)
+- 코드 근거가 없는 전환은 라벨에 `[추정]`을 붙이고 `dashed: true`로 표시한다.
+- 인라인 SVG는 JS 없이 동작하므로 **HTML과 PDF 모두에서** 렌더링된다.
+
+#### 4-C. 의존성 설치 (최초 1회)
 
 ```bash
 pip install weasyprint markdown python-docx --quiet
@@ -182,7 +197,7 @@ pip install weasyprint markdown python-docx --quiet
 
 > 환경에 이미 설치돼 있으면 생략한다. `--format html` 미리보기는 weasyprint 없이도 가능하다.
 
-#### 4-C. 렌더링 실행
+#### 4-D. 렌더링 실행
 
 ```bash
 python ${CLAUDE_SKILL_DIR}/scripts/render.py --input reverse-spec-output/_spec_body.md --format pdf --title "역기획 정책서" --accent "#2c2c2c" --outdir reverse-spec-output --name reverse_spec

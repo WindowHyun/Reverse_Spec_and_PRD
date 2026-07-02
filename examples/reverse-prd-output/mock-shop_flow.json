@@ -1,0 +1,23 @@
+{
+  "nodes": [
+    {"id": "home",     "label": "홈 /",              "guard": "public"},
+    {"id": "login",    "label": "로그인 /login",      "guard": "public"},
+    {"id": "products", "label": "상품목록 /products", "guard": "public"},
+    {"id": "detail",   "label": "상품상세 /:id",      "guard": "public"},
+    {"id": "cart",     "label": "장바구니 /cart",     "guard": "public"},
+    {"id": "checkout", "label": "결제 /checkout",     "guard": "login"},
+    {"id": "orders",   "label": "주문내역 /orders",   "guard": "login"},
+    {"id": "admin",    "label": "관리자 /admin",      "guard": "admin"}
+  ],
+  "edges": [
+    {"from": "home",     "to": "products", "label": "탐색"},
+    {"from": "products", "to": "detail",   "label": "상품 선택"},
+    {"from": "detail",   "to": "cart",     "label": "담기 [추정]", "dashed": true},
+    {"from": "cart",     "to": "checkout", "label": "결제하기 (빈 장바구니 차단)"},
+    {"from": "checkout", "to": "orders",   "label": "주문 완료"},
+    {"from": "checkout", "to": "login",    "label": "미인증 시", "dashed": true},
+    {"from": "login",    "to": "checkout", "label": "로그인 후 복귀", "dashed": true},
+    {"from": "home",     "to": "admin",    "label": "admin 전용", "dashed": true}
+  ],
+  "entry": ["home"]
+}

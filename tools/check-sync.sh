@@ -9,6 +9,7 @@ cd "$(dirname "$0")/.."
 SHARED_FILES=(
   "reference.md"
   "scripts/render.py"
+  "scripts/flowgen.py"
 )
 
 status=0
