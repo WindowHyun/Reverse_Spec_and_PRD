@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&display=swap');
+  body { font-family: 'Noto Sans KR', sans-serif; font-size: 11pt; line-height: 1.8;
+          color: #1a1a1a; margin: 0; padding: 0; }
+  h1 { font-size: 20pt; border-bottom: 2px solid #1f4e79; padding-bottom: 8px;
+        margin-top: 40px; color: #1f4e79; }
+  h2 { font-size: 15pt; border-left: 4px solid #1f4e79; padding-left: 10px; margin-top: 30px; }
+  h3 { font-size: 12pt; color: #444; margin-top: 20px; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 10pt; }
+  th { background: #1f4e79; color: white; padding: 8px 12px; text-align: left; }
+  td { border: 1px solid #ccc; padding: 7px 12px; vertical-align: top; }
+  tr:nth-child(even) td { background: #f5f7fa; }
+  code { background: #eef2f7; padding: 2px 5px; border-radius: 3px; font-size: 9.5pt; }
+  pre { background: #1e1e1e; color: #d4d4d4; padding: 14px; border-radius: 6px;
+         font-size: 9pt; overflow-x: auto; }
+  pre code { background: transparent; color: inherit; padding: 0; }
+  blockquote { border-left: 4px solid #c47a00; background:#fff8ec; margin:16px 0;
+               padding:8px 16px; color:#7a5200; }
+  /* 브라우저 화면 전용 여백 — weasyprint(PDF)는 print 매체라 무시하고 @page 여백을 쓴다 */
+  @media screen {
+    body { max-width: 860px; margin: 0 auto; padding: 32px 24px; }
+  }
+  @page {
+    size: A4;
+    margin: 20mm 18mm 20mm 20mm;
+    @top-center { content: "역기획 PRD (하이브리드)"; font-size: 9pt; color: #888; }
+    @bottom-right { content: counter(page) " / " counter(pages); font-size: 9pt; color: #888; }
+  }
+</style>
+</head>
+<body>
+<h1 id="prd-mock-shop">역기획 PRD — mock-shop (하이브리드 방식)</h1>
+<blockquote>
+<p><strong>이 문서의 신뢰 등급 체계</strong>
+🔒 <strong>파서 추출</strong> — <code>extract.py</code>가 코드에서 결정적으로 추출. 재실행해도 항상 동일 (SHA-256 검증됨).
+✍️ <strong>LLM 서술</strong> — 추출된 사실만을 근거로 LLM이 해석·작성. 재실행 시 표현이 달라질 수 있으며 <code>[추정]</code> 규칙 적용.</p>
+</blockquote>
+<h2 id="1-overview">1. Overview ✍️</h2>
+<table>
+<thead>
+<tr>
+<th>항목</th>
+<th>내용</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>제품 한 줄 요약</td>
+<td>로그인 기반 온라인 상점 — 탐색·장바구니·결제·주문내역 스토어프론트</td>
+</tr>
+<tr>
+<td>분석 방식</td>
+<td>하이브리드: 사실은 파서(extract.py), 해석·서술은 LLM</td>
+</tr>
+<tr>
+<td>분석 대상</td>
+<td><code>examples/mock-shop/src</code> (6개 소스 파일)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="2-fact-layer">2. 사실 계층 (Fact Layer) 🔒</h2>
+<p>아래 5개 표는 <strong>extract.py 출력 그대로</strong>이며 LLM이 한 글자도 만지지 않았다.
+같은 코드로 재실행하면 항상 동일하다.</p>
+<h2 id="_1">라우트 맵 (파서 추출)</h2>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>컴포넌트</th>
+<th>보호</th>
+<th>근거 파일</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>/</td>
+<td>Home</td>
+<td>공개</td>
+<td><code>router.tsx</code></td>
+</tr>
+<tr>
+<td>/admin</td>
+<td>AdminDashboard</td>
+<td>role=admin</td>
+<td><code>router.tsx</code></td>
+</tr>
+<tr>
+<td>/cart</td>
+<td>Cart</td>
+<td>공개</td>
+<td><code>router.tsx</code></td>
+</tr>
+<tr>
+<td>/checkout</td>
+<td>Checkout</td>
+<td>로그인 필요</td>
+<td><code>router.tsx</code></td>
+</tr>
+<tr>
+<td>/login</td>
+<td>Login</td>
+<td>공개</td>
+<td><code>router.tsx</code></td>
+</tr>
+<tr>
+<td>/orders</td>
+<td>Orders</td>
+<td>로그인 필요</td>
+<td><code>router.tsx</code></td>
+</tr>
+<tr>
+<td>/products</td>
+<td>ProductList</td>
+<td>공개</td>
+<td><code>router.tsx</code></td>
+</tr>
+<tr>
+<td>/products/:id</td>
+<td>ProductDetail</td>
+<td>공개</td>
+<td><code>router.tsx</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="_2">컴포넌트 분석 범위 (파서 추출)</h2>
+<table>
+<thead>
+<tr>
+<th>컴포넌트</th>
+<th>소스 파일</th>
+<th>분석 가능</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AdminDashboard</td>
+<td>—</td>
+<td>❌ import만 — [정보 없음]</td>
+</tr>
+<tr>
+<td>Cart</td>
+<td><code>pages/Cart.tsx</code></td>
+<td>✅ 소스 포함</td>
+</tr>
+<tr>
+<td>Checkout</td>
+<td><code>pages/Checkout.tsx</code></td>
+<td>✅ 소스 포함</td>
+</tr>
+<tr>
+<td>Home</td>
+<td>—</td>
+<td>❌ import만 — [정보 없음]</td>
+</tr>
+<tr>
+<td>Login</td>
+<td><code>pages/Login.tsx</code></td>
+<td>✅ 소스 포함</td>
+</tr>
+<tr>
+<td>Orders</td>
+<td>—</td>
+<td>❌ import만 — [정보 없음]</td>
+</tr>
+<tr>
+<td>ProductDetail</td>
+<td>—</td>
+<td>❌ import만 — [정보 없음]</td>
+</tr>
+<tr>
+<td>ProductList</td>
+<td>—</td>
+<td>❌ import만 — [정보 없음]</td>
+</tr>
+<tr>
+<td>RequireAuth</td>
+<td><code>lib/RequireAuth.tsx</code></td>
+<td>✅ 소스 포함</td>
+</tr>
+</tbody>
+</table>
+<h2 id="api">API 호출 (파서 추출)</h2>
+<table>
+<thead>
+<tr>
+<th>엔드포인트</th>
+<th>메서드</th>
+<th>근거</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/api/auth/login</code></td>
+<td>POST</td>
+<td><code>pages/Login.tsx (주석)</code></td>
+</tr>
+<tr>
+<td><code>/api/orders</code></td>
+<td>POST</td>
+<td><code>pages/Checkout.tsx (주석)</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="_3">비즈니스 상수 (파서 추출)</h2>
+<table>
+<thead>
+<tr>
+<th>상수</th>
+<th>값</th>
+<th>근거 파일</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>FREE_SHIPPING_THRESHOLD</code></td>
+<td>50000</td>
+<td><code>pages/Checkout.tsx</code></td>
+</tr>
+<tr>
+<td><code>SHIPPING_FEE</code></td>
+<td>3000</td>
+<td><code>pages/Checkout.tsx</code></td>
+</tr>
+</tbody>
+</table>
+<h2 id="_4">검증/차단 규칙 (파서 추출)</h2>
+<table>
+<thead>
+<tr>
+<th>유형</th>
+<th>조건</th>
+<th>효과</th>
+<th>근거 파일</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>동작 차단</td>
+<td><code>items.length === 0</code></td>
+<td>버튼 비활성화</td>
+<td><code>pages/Cart.tsx</code></td>
+</tr>
+<tr>
+<td>범위 제한</td>
+<td><code>min 1 / max it.stock</code></td>
+<td>입력값 범위 강제</td>
+<td><code>pages/Cart.tsx</code></td>
+</tr>
+<tr>
+<td>입력 검증</td>
+<td><code>!email</code></td>
+<td>메시지 "이메일을 입력해주세요."</td>
+<td><code>pages/Login.tsx</code></td>
+</tr>
+<tr>
+<td>입력 검증</td>
+<td><code>password.length &lt; 8</code></td>
+<td>메시지 "비밀번호는 8자 이상이어야 합니다."</td>
+<td><code>pages/Login.tsx</code></td>
+</tr>
+<tr>
+<td>필수값</td>
+<td><code>address 미입력</code></td>
+<td>알림 "배송지를 입력해주세요." 후 중단</td>
+<td><code>pages/Checkout.tsx</code></td>
+</tr>
+</tbody>
+</table>
+<!-- 추출 통계: 라우트 8 · 컴포넌트 9 · API 2 · 상수 2 · 규칙 5 -->
+
+<h2 id="3-interpretation-layer">3. 해석 계층 (Interpretation Layer) ✍️</h2>
+<p><strong>이하 서술은 위 사실 계층의 표만을 근거로 작성되었다. 표에 없는 화면·API·규칙은 언급하지 않는다.</strong></p>
+<h3 id="31">3.1 사용자 &amp; 페르소나 <code>[추정]</code></h3>
+<p>라우트 맵의 보호 컬럼이 세 등급(공개 / 로그인 필요 / role=admin)으로 나뉘므로,
+<strong>비로그인 방문자 · 일반 구매자 · 관리자</strong>의 3개 페르소나를 추정한다.</p>
+<h3 id="32">3.2 핵심 사용자 여정 <code>[추정]</code></h3>
+<p>공개 라우트(<code>/products</code> → <code>/products/:id</code> → <code>/cart</code>)에서 보호 라우트(<code>/checkout</code> → <code>/orders</code>)로
+이어지는 구조는 전형적인 <strong>구매 퍼널</strong>이다. <code>/checkout</code>의 "로그인 필요" 가드는
+결제 직전에 인증을 강제하는 설계로 해석된다.</p>
+<h3 id="33">3.3 핵심 비즈니스 규칙 해석</h3>
+<ul>
+<li>🔒 <code>FREE_SHIPPING_THRESHOLD = 50000</code> + <code>SHIPPING_FEE = 3000</code> → ✍️ <strong>"5만원 이상 무료배송, 미만 3,000원"</strong> 정책 <code>[클라이언트 측 — 서버 미확인]</code></li>
+<li>🔒 <code>disabled={items.length === 0}</code> → ✍️ <strong>빈 장바구니 결제 차단</strong> 요구사항</li>
+<li>🔒 검증 규칙 표의 이메일 형식·비밀번호 8자 조건 → ✍️ 입력값 정책 (서버 측 동일 검증 여부 확인 필요)</li>
+</ul>
+<h3 id="34">3.4 리스크 &amp; 확인 필요 <code>[추정]</code></h3>
+<ol>
+<li>컴포넌트 분석 범위 표에서 <strong>5개 화면이 ❌ import만</strong> 상태 — 해당 화면 내부 동작은 이 문서가 보증하지 않는다.</li>
+<li>권한 가드는 클라이언트 코드에만 존재 — 서버 측 인가 확인 필요.</li>
+<li><code>/signup</code> 라우트 부재 — 계정 생성 흐름 미확인.</li>
+</ol>
+<h2 id="4">4. 재현성 정보 🔒</h2>
+<ul>
+<li>사실 계층 생성: <code>python extract.py ../mock-shop/src</code></li>
+<li>검증: 2회 실행 SHA-256 동일 (<code>d717700f…4742</code>)</li>
+<li>서술 계층: 재실행 시 문구가 달라질 수 있으나, 사실 계층 밖의 내용을 도입할 수 없음</li>
+</ul>
+</body>
+</html>

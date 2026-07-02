@@ -52,6 +52,10 @@ def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
   pre code {{ background: transparent; color: inherit; padding: 0; }}
   blockquote {{ border-left: 4px solid #c47a00; background:#fff8ec; margin:16px 0;
                padding:8px 16px; color:#7a5200; }}
+  /* 브라우저 화면 전용 여백 — weasyprint(PDF)는 print 매체라 무시하고 @page 여백을 쓴다 */
+  @media screen {{
+    body {{ max-width: 860px; margin: 0 auto; padding: 32px 24px; }}
+  }}
   @page {{
     size: A4;
     margin: 20mm 18mm 20mm 20mm;
