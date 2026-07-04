@@ -229,6 +229,15 @@ PDF는 공유/인쇄용. `--format docx,html`을 지정하면 PDF 대신 Word로
 
 ---
 
+## 현재 검증 상태
+
+`extract.py`의 결정성은 동봉된 mock-shop 예제(해시 검증)에서만 증명되었다. 정규식
+기반이라 Next.js/Nuxt 파일 기반 라우팅, Vue `<script setup>`, CSS-in-JS, 비표준 상태관리
+패턴은 놓칠 수 있다 — `reference.md` 1-I의 "추출 통계가 비정상적으로 낮을 때" 경고 절차
+참조. 대형 코드베이스 분할 모드는 절차로만 작성되었고 실제 30개 초과 프로젝트에서
+실행해본 적은 없다. 실제 코드베이스에 돌려보고 추출 통계가 합리적인지 먼저 확인한 뒤,
+초안 이상의 용도로 신뢰하기 바란다.
+
 ## 참고
 
 - 공식 문서 기반 준수 리뷰: [`docs/skill-mcp-review.md`](docs/skill-mcp-review.md)

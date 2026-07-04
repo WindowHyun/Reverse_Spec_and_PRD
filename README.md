@@ -234,6 +234,15 @@ Static analysis is honest about its limits:
 
 ---
 
+## Current validation status
+
+`extract.py`'s determinism is proven only on the bundled mock-shop example (hash-verified
+across runs). It's regex-based, so file-based routing (Next.js/Nuxt), Vue `<script setup>`,
+CSS-in-JS, and non-standard state patterns may be missed — see `reference.md` §1-I for the
+built-in low-fact-count warning. The large-codebase split mode is written as a procedure but
+hasn't been exercised on a real 30+ file project yet. Try it on your own codebase and sanity-check
+the extraction stats before relying on it for anything beyond a first draft.
+
 ## See also
 
 - Official-docs-based compliance review: [`docs/skill-mcp-review.md`](docs/skill-mcp-review.md)

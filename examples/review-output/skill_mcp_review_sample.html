@@ -317,6 +317,38 @@ Bash(pip3 install weasyprint *), Bash(pip3 install markdown *), Bash(pip3 instal
 <li><code>reference.md</code> + <code>scripts/</code> 3종은 두 스킬에 동일 사본 — <code>tools/check-sync.sh</code>로 검증.</li>
 </ul>
 <hr />
+<h2 id="9-2026-07-02">9. 검증 상태 — 무엇이 실제로 증명됐고 무엇이 아직인가 (2026-07-02)</h2>
+<p>과대평가를 막기 위해, "구현됨"과 "실전 검증됨"을 구분해 명시한다.</p>
+<table>
+<thead>
+<tr>
+<th>항목</th>
+<th>증명된 것</th>
+<th>아직 증명 안 된 것</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>extract.py</code> 결정성</td>
+<td>mock-shop(6파일)에서 2회 실행 SHA-256 동일</td>
+<td><strong>실전 코드베이스에서의 커버리지</strong> — 정규식 기반이라 Next.js 파일 라우팅, Vue <code>&lt;script setup&gt;</code>, CSS-in-JS, 비표준 상태관리 패턴은 놓칠 수 있음 (<code>reference.md</code> 1-I)</td>
+</tr>
+<tr>
+<td>분할 모드(대형 코드베이스)</td>
+<td>SKILL.md에 절차로 명문화, 공식 sub-agents 패턴 근거</td>
+<td><strong>30개 초과 실제 프로젝트에서 실행된 적 없음</strong> — 모듈 분할 기준, 병합 로직의 실전 판단 미검증</td>
+</tr>
+<tr>
+<td>전체 파이프라인(extract→flowgen→render)</td>
+<td>개별 스크립트 3종 각각 CLI로 직접 실행해 동작 확인</td>
+<td><strong>Claude Code가 SKILL.md를 읽고 실제로 이 순서를 트리거하는 end-to-end 실행은 미실행</strong> — 스크립트는 맞아도 스킬 지침이 의도대로 유도하는지는 별개</td>
+</tr>
+</tbody>
+</table>
+<p><strong>권고</strong>: 조직 표준 도구로 채택하기 전에, 실제 사내 코드베이스 1~2건에 그대로 실행해
+<code>extract.py</code>의 추출 통계가 합리적인지(라우트/컴포넌트 수가 코드 규모와 맞는지) 확인할 것.
+비정상적으로 낮으면 1-I의 파서 커버리지 경고 절차가 트리거되는지도 함께 확인한다.</p>
+<hr />
 <h3 id="_1">출처</h3>
 <ul>
 <li>https://code.claude.com/docs/en/skills.md (프론트매터 필드 표, 디렉토리 구조, <code>${CLAUDE_SKILL_DIR}</code>)</li>
