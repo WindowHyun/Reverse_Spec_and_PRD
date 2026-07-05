@@ -35,6 +35,7 @@ import sys
 NODE_W, NODE_H = 168, 52
 GAP_X, GAP_Y = 72, 36
 PAD = 24
+MAX_NODES = 60  # 과밀/거대 SVG 방지 — 초과 시 잘라내고 stderr에 경고
 
 GUARD_STYLE = {
     "public": {"fill": "#f4f6f8", "stroke": "#8a97a3", "badge": ""},
@@ -93,18 +94,20 @@ def esc(s: str) -> str:
 def build_svg(data: dict) -> str:
     nodes = data["nodes"]
     edges = data.get("edges", [])
+    if len(nodes) > MAX_NODES:
+        print(f"⚠️  노드 {len(nodes)}개 중 {MAX_NODES}개만 표시 (과밀 방지) — "
+              f"전체 목록은 사실 표(_facts.md)를 참조", file=sys.stderr)
+        kept_ids = {n["id"] for n in nodes[:MAX_NODES]}
+        nodes = nodes[:MAX_NODES]
+        edges = [e for e in edges if e["from"] in kept_ids and e["to"] in kept_ids]
     lay = layout(nodes, edges, data.get("entry", []))
     pos = lay["pos"]
 
-    parts = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {lay["width"]} {lay["height"]}" '
-        f'width="100%" style="max-width:{lay["width"]}px;font-family:\'Noto Sans KR\',sans-serif;">',
-        '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" '
-        'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
-        '<path d="M 0 0 L 10 5 L 0 10 z" fill="#5a6672"/></marker></defs>',
-    ]
-
-    # 엣지 먼저 (노드 아래 깔리도록)
+    # 엣지 지오메트리를 먼저 계산해 역방향(복귀) 우회 경로가 실제로 필요로 하는
+    # 최대 y좌표를 구한다 — 이전에는 이 여유 공간을 고려하지 않고 컬럼 크기만으로
+    # viewBox 높이를 정해, 노드가 많으면 우회 경로가 캔버스 밖으로 잘릴 수 있었다.
+    edge_parts = []
+    max_y_needed = lay["height"]
     for e in edges:
         if e["from"] not in pos or e["to"] not in pos:
             continue
@@ -123,6 +126,7 @@ def build_svg(data: dict) -> str:
             dy = max(y1, y2) + NODE_H + 18
             path = f"M {sx} {y1 + NODE_H} C {sx} {dy}, {tx} {dy}, {tx} {y2 + NODE_H}"
             lx, ly = (sx + tx) / 2, dy + 4
+            max_y_needed = max(max_y_needed, dy + 16)
         else:                             # 같은 컬럼: 위/아래 직결
             sx = x1 + NODE_W / 2
             if ty > sy:
@@ -131,11 +135,22 @@ def build_svg(data: dict) -> str:
                 path = f"M {sx} {y1} L {sx} {y2 + NODE_H}"
             lx, ly = sx + 6, (sy + ty) / 2
         dash = ' stroke-dasharray="5 4"' if e.get("dashed") else ""
-        parts.append(f'<path d="{path}" fill="none" stroke="#5a6672" '
-                     f'stroke-width="1.6" marker-end="url(#arrow)"{dash}/>')
+        edge_parts.append(
+            f'<path d="{path}" fill="none" stroke="#5a6672" '
+            f'stroke-width="1.6" marker-end="url(#arrow)"{dash}/>')
         if e.get("label"):
-            parts.append(f'<text x="{lx}" y="{ly}" font-size="11" fill="#41505c" '
-                         f'text-anchor="middle">{esc(e["label"])}</text>')
+            edge_parts.append(f'<text x="{lx}" y="{ly}" font-size="11" fill="#41505c" '
+                              f'text-anchor="middle">{esc(e["label"])}</text>')
+
+    height = max_y_needed
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {lay["width"]} {height}" '
+        f'width="100%" style="max-width:{lay["width"]}px;font-family:\'Noto Sans KR\',sans-serif;">',
+        '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" '
+        'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+        '<path d="M 0 0 L 10 5 L 0 10 z" fill="#5a6672"/></marker></defs>',
+    ]
+    parts.extend(edge_parts)  # 엣지 먼저 (노드 아래 깔리도록)
 
     # 노드
     for n in nodes:

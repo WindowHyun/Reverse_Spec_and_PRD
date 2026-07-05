@@ -14,7 +14,7 @@ reference.md의 1-A~1-H 추출 규칙을 파서(정규식)로 구현한다. LLM 
   python extract.py <대상경로> --output facts.md [--emit-flow flow.json]
 
 출력:
-  facts.md   : 1-A~1-H 사실 표 (Markdown) — 문서의 사실 계층에 그대로 사용
+  facts.md   : 1-A~1-H, 1-J 사실 표 (Markdown) — 문서의 사실 계층에 그대로 사용
   flow.json  : (선택) flowgen.py 입력용 흐름도 스켈레톤 — LLM이 라벨/점선 보강 후 사용
 """
 import argparse
@@ -25,6 +25,17 @@ import subprocess
 import sys
 
 SRC_EXT = (".tsx", ".ts", ".jsx", ".js", ".vue", ".html")
+
+SECRET_FILENAMES = {"secrets.json", "credentials.json", "id_rsa", "id_rsa.pub"}
+SECRET_SUFFIXES = (".pem", ".key")
+SECRET_KEY_PATTERNS = [
+    (r"AKIA[0-9A-Z]{16}", "AWS access key"),
+    (r"AIza[0-9A-Za-z_\-]{35}", "Google API key"),
+    (r"sk_(?:live|test)_[0-9a-zA-Z]{16,}", "Stripe secret key"),
+    (r"gh[pousr]_[0-9A-Za-z]{20,}", "GitHub token"),
+    (r"xox[baprs]-[0-9A-Za-z-]{10,}", "Slack token"),
+]
+
 # 서드파티 판정에서 제외할 프레임워크/유틸 (서비스 연동이 아닌 것)
 FRAMEWORK_DEPS = {
     "react", "react-dom", "react-router", "react-router-dom", "vue", "vue-router",
@@ -41,6 +52,25 @@ TRACKING_PATTERNS = [
 ]
 
 
+def _blank_full_line_comments(src: str) -> str:
+    """실전 검증 교훈(reverse-backend 자매 스킬에서 먼저 발견 후 이식): 통째로
+    주석 처리된 죽은 코드(예: `// if (!token) return "..."`, `// <RequireAuth
+    role="admin">`)가 실제 정책/화면으로 오탐되는 것을 막는다. 한 줄 전체가
+    `//`로 시작하는 라인과, 한 줄 안에서 완전히 닫히는 HTML 주석
+    (`<!-- ... -->`)만 제외한다. JSX 블록 주석(`{/* ... */}`)과 여러 줄에
+    걸친 블록 주석은 다루지 않음 — reference.md 1-I에 한계 명시."""
+    out = []
+    for line in src.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("//"):
+            out.append("")
+        elif stripped.startswith("<!--") and stripped.rstrip().endswith("-->"):
+            out.append("")
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 def read_sources(root: pathlib.Path) -> dict:
     files = {}
     for p in sorted(root.rglob("*")):
@@ -50,9 +80,12 @@ def read_sources(root: pathlib.Path) -> dict:
             continue
         if p.suffix in SRC_EXT or p.name == "package.json":
             try:
-                files[str(p.relative_to(root))] = p.read_text(encoding="utf-8")
+                text = p.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
+            if p.name != "package.json":
+                text = _blank_full_line_comments(text)
+            files[str(p.relative_to(root))] = text
     return files
 
 
@@ -109,12 +142,32 @@ def extract_components(files: dict) -> list:
 
 # ── 1-C. API / 상수 / 검증·차단 규칙 ─────────────────────────
 
+def _find_matching_paren(src: str, open_idx: int) -> int:
+    """open_idx는 여는 '(' 위치. 중첩 괄호까지 셈해 대응하는 닫는 ')' 인덱스를
+    반환한다 (문자열 리터럴 안의 괄호는 구분하지 않는 근사치). 실전 검증 발견:
+    `fetch(url, { body: JSON.stringify({...}) })`처럼 옵션 안에 중첩 괄호가
+    있으면 non-greedy `.*?\\)` 정규식이 첫 ')'에서 조기 종료돼 method 등을
+    놓칠 수 있어, 괄호 카운팅으로 전체 호출 범위를 정확히 찾도록 교체."""
+    depth = 0
+    for i in range(open_idx, len(src)):
+        if src[i] == "(":
+            depth += 1
+        elif src[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
 def extract_api_calls(files: dict) -> list:
     calls = []
     for fname, src in files.items():
-        for m in re.finditer(r'fetch\(\s*[\'"`]([^\'"`]+)[\'"`](.*?)\)', src, re.S):
+        for m in re.finditer(r'fetch\(\s*[\'"`]([^\'"`]+)[\'"`]', src):
+            paren_idx = src.index("(", m.start())
+            close_idx = _find_matching_paren(src, paren_idx)
+            call_text = src[paren_idx:close_idx + 1] if close_idx != -1 else m.group(0)
             method = "GET"
-            m_method = re.search(r'method:\s*[\'"](\w+)[\'"]', m.group(2))
+            m_method = re.search(r'method:\s*[\'"](\w+)[\'"]', call_text)
             if m_method:
                 method = m_method.group(1)
             calls.append({"endpoint": m.group(1), "method": method, "source": fname})
@@ -135,12 +188,30 @@ def extract_constants(files: dict) -> list:
     return sorted(consts, key=lambda c: (c["name"], c["source"]))
 
 
+def _find_if_return_pairs(src: str) -> list:
+    """`if (조건) return "메시지"` 패턴을 중첩 괄호까지 고려해 찾는다.
+    extract_rules와 extract_messages가 이 로직을 각자 따로 구현하면서
+    한쪽만 고쳐 결과가 어긋나는(drift) 위험이 있어 공용 헬퍼로 통합했다
+    (실전 검증에서 fetch()와 동일한 중첩괄호 버그가 여기서도 발견된 뒤 정리)."""
+    pairs = []
+    for m in re.finditer(r"if\s*\(", src):
+        paren_idx = src.index("(", m.start())
+        close_idx = _find_matching_paren(src, paren_idx)
+        if close_idx == -1:
+            continue
+        condition = src[paren_idx + 1:close_idx].strip()
+        m2 = re.match(r'\s*return\s*"([^"]+)"', src[close_idx + 1:close_idx + 300])
+        if condition and m2:
+            pairs.append((condition, m2.group(1)))
+    return pairs
+
+
 def extract_rules(files: dict) -> list:
     rules = []
     for fname, src in files.items():
-        for m in re.finditer(r'if\s*\(([^)]+)\)\s*return\s*"([^"]+)"', src):
-            rules.append({"kind": "입력 검증", "condition": m.group(1).strip(),
-                          "effect": f'메시지 "{m.group(2)}"', "source": fname})
+        for condition, message in _find_if_return_pairs(src):
+            rules.append({"kind": "입력 검증", "condition": condition,
+                          "effect": f'메시지 "{message}"', "source": fname})
         for m in re.finditer(r"min=\{(\w+)\}\s+max=\{([\w.]+)\}", src):
             rules.append({"kind": "범위 제한", "condition": f"min {m.group(1)} / max {m.group(2)}",
                           "effect": "입력값 범위 강제", "source": fname})
@@ -185,8 +256,8 @@ def extract_messages(files: dict) -> list:
             continue
         for m in re.finditer(r'\balert\(\s*"([^"]+)"\s*\)', src):
             add(m.group(1), "확인(alert)", "코드 분기", fname)
-        for m in re.finditer(r'if\s*\(([^)]+)\)\s*return\s*"([^"]+)"', src):
-            add(m.group(2), "에러", m.group(1).strip(), fname)
+        for condition, message in _find_if_return_pairs(src):
+            add(message, "에러", condition, fname)
         for m in re.finditer(r'setError\(\s*"([^"]+)"\s*\)', src):
             add(m.group(1), "에러", "코드 분기", fname)
         for m in re.finditer(r'placeholder="([^"]+)"', src):
@@ -257,13 +328,65 @@ def extract_snapshot(root: pathlib.Path, files: dict) -> dict:
     return {"commit": commit, "commit_time": when, "files": sorted(files)}
 
 
+# ── 1-J. 하드코딩 시크릿 노출 스캔 (reverse-backend에서 검증된 로직 이식) ──
+
+def extract_secret_findings(root: pathlib.Path) -> list:
+    """reference.md의 '민감 정보는 문서에 포함하지 않고 경고로 표시'라는 원칙이
+    실제로는 코드로 강제되지 않던 것을 이식으로 보완 (reverse-backend 자매
+    스킬에서 먼저 구현·검증됨). 실제 값은 절대 읽어 반환하지 않는다."""
+    findings = []
+    tracked = set()
+    try:
+        out = subprocess.run(["git", "ls-files"], cwd=root, capture_output=True,
+                             text=True, timeout=10)
+        if out.returncode == 0:
+            tracked = set(out.stdout.splitlines())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    for p in sorted(root.rglob("*")):
+        if not p.is_file() or ".git" in p.parts:
+            continue
+        rel = str(p.relative_to(root))
+        if p.name in SECRET_FILENAMES or p.suffix in SECRET_SUFFIXES:
+            findings.append({"path": rel, "pattern": f"파일명/확장자: {p.name or p.suffix}",
+                             "tracked": rel in tracked})
+            continue
+        if p.name == ".env":
+            findings.append({"path": rel, "pattern": ".env 파일", "tracked": rel in tracked})
+            continue
+        if p.suffix in (".ts", ".tsx", ".js", ".jsx", ".json", ".yml", ".yaml"):
+            try:
+                text = p.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for pattern, label in SECRET_KEY_PATTERNS:
+                if re.search(pattern, text):
+                    findings.append({"path": rel, "pattern": label, "tracked": rel in tracked})
+                    break
+    uniq = {(f["path"], f["pattern"]): f for f in findings}
+    return sorted(uniq.values(), key=lambda f: f["path"])
+
+
 # ── 출력 ─────────────────────────────────────────────────────
+
+def _escape_cell(v: str) -> str:
+    """테이블 셀 안전화. 백틱(`...`)으로 감싼 값은 마크다운 코드 스팬이 되어
+    렌더러가 이미 파이프를 리터럴로 보존하므로 이스케이프하지 않는다 — 백틱
+    안에서 `\\|`를 이스케이프하면 CommonMark 코드 스팬 규칙상 백슬래시 이스케이프가
+    처리되지 않아 화면에 `\\`가 그대로 노출되는 버그가 있었다 (실전 검증 발견).
+    백틱 밖의 순수 텍스트에 파이프가 있으면 `\\|`로 이스케이프해 컬럼 분리를 막는다."""
+    s = str(v)
+    if s.startswith("`") and s.endswith("`") and len(s) >= 2:
+        return s
+    return s.replace("|", "\\|")
+
 
 def md_table(headers: list, rows: list) -> str:
     out = ["| " + " | ".join(headers) + " |",
            "|" + "|".join("---" for _ in headers) + "|"]
     for r in rows:
-        out.append("| " + " | ".join(str(v).replace("|", "\\|") for v in r) + " |")
+        out.append("| " + " | ".join(_escape_cell(v) for v in r) + " |")
     return "\n".join(out)
 
 
@@ -276,9 +399,19 @@ def guard_label(g: str) -> str:
 
 
 def build_facts_md(root, routes, comps, apis, consts, rules, trans, msgs, state,
-                   integ, snap) -> str:
+                   integ, snap, secrets) -> str:
     s = ["<!-- scripts/extract.py 출력 — 결정적 사실 계층. LLM은 이 표를 근거로만 해석한다. -->",
-         "", "## 1-H. As-Is 스냅샷 (비교 기준선)", "",
+         ""]
+    if secrets:
+        s += ["## ⚠️ 1-J. 하드코딩 시크릿 노출 스캔 — 발견됨 (값은 미출력)", "",
+              md_table(["파일 경로", "발견 패턴", "git 추적됨"],
+                       [[f["path"], f["pattern"], "예 — 즉시 로테이션 권고" if f["tracked"]
+                         else "아니오"] for f in secrets]),
+              "", "> 실제 값은 이 문서에 포함하지 않았다. git 추적 대상이면 이미 커밋 "
+              "이력에 남아있으므로 값 로테이션 + 히스토리 제거를 권고한다.", ""]
+    else:
+        s += ["## 1-J. 하드코딩 시크릿 노출 스캔", "", "발견된 항목 없음 (스캔 범위 내).", ""]
+    s += ["## 1-H. As-Is 스냅샷 (비교 기준선)", "",
          md_table(["항목", "값"], [["기준 커밋", f"`{snap['commit']}`"],
                                    ["커밋 시점", snap["commit_time"]],
                                    ["분석 파일 수", len(snap["files"])],
@@ -390,9 +523,10 @@ def main() -> int:
     state = extract_state(files)
     integ = extract_integrations(files)
     snap = extract_snapshot(root, files)
+    secrets = extract_secret_findings(root)
 
     md = build_facts_md(root, routes, comps, apis, consts, rules, trans, msgs,
-                        state, integ, snap)
+                        state, integ, snap, secrets)
     if args.output:
         pathlib.Path(args.output).write_text(md, encoding="utf-8")
         print(f"✅ 사실 표 생성 완료: {args.output}", file=sys.stderr)
@@ -404,6 +538,10 @@ def main() -> int:
         pathlib.Path(args.emit_flow).write_text(
             json.dumps(flow, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"✅ 흐름 스켈레톤 생성 완료: {args.emit_flow}", file=sys.stderr)
+
+    if secrets:
+        print(f"⚠️  시크릿 노출 의심 {len(secrets)}건 발견 — facts.md 1-J 참조",
+              file=sys.stderr)
     return 0
 
 

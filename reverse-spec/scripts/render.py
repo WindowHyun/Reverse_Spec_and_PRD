@@ -84,8 +84,41 @@ _INLINE = re.compile(r"\*\*(.+?)\*\*|`(.+?)`")
 
 
 def _clean_inline(text: str) -> str:
-    """docx 평문용: **bold**/`code` 마크업 기호를 제거."""
-    return _INLINE.sub(lambda m: m.group(1) or m.group(2), text)
+    """docx 평문용: **bold**/`code` 마크업 기호를 제거하고, 이스케이프된
+    파이프(\\|)를 리터럴 |로 되돌린다 (extract.py의 _escape_cell과 짝을 이룸)."""
+    text = _INLINE.sub(lambda m: m.group(1) or m.group(2), text)
+    return text.replace("\\|", "|")
+
+
+def _split_table_row(line: str) -> list:
+    """GFM 파이프 테이블 행을 셀로 분리한다. 백틱(코드 스팬) 안의 파이프와
+    백슬래시로 이스케이프된 파이프(\\|)는 구분자로 보지 않는다 — 기존의 단순
+    line.split("|")는 이 두 경우를 무시해 JS `a || b` 같은 조건문이 들어간
+    셀에서 뒤 컬럼(근거 파일 등)이 통째로 사라지는 버그가 있었다 (실전 검증 발견)."""
+    cells, buf, in_backtick, i = [], [], False, 0
+    while i < len(line):
+        ch = line[i]
+        if ch == "\\" and i + 1 < len(line) and line[i + 1] == "|":
+            buf.append("|")
+            i += 2
+            continue
+        if ch == "`":
+            in_backtick = not in_backtick
+            buf.append(ch)
+        elif ch == "|" and not in_backtick:
+            cells.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    cells.append("".join(buf))
+    # 라인이 "| a | b |" 형태면 앞뒤 빈 셀(선행/후행 |)이 생기므로 제거
+    stripped = line.strip()
+    if stripped.startswith("|") and cells and cells[0].strip() == "":
+        cells = cells[1:]
+    if stripped.endswith("|") and cells and cells[-1].strip() == "":
+        cells = cells[:-1]
+    return [c.strip() for c in cells]
 
 
 def render_docx(md_text: str, out_path: pathlib.Path, title: str) -> None:
@@ -116,10 +149,8 @@ def render_docx(md_text: str, out_path: pathlib.Path, title: str) -> None:
         # GFM 파이프 테이블: 2번째 행이 |---| 구분선
         rows = [r for r in table_buf if r.strip()]
         if len(rows) >= 2:
-            def cells(line: str) -> list[str]:
-                return [c.strip() for c in line.strip().strip("|").split("|")]
-            header = cells(rows[0])
-            data = [cells(r) for r in rows[2:]]
+            header = _split_table_row(rows[0])
+            data = [_split_table_row(r) for r in rows[2:]]
             t = doc.add_table(rows=1 + len(data), cols=len(header))
             t.style = "Table Grid"
             for j, h in enumerate(header):

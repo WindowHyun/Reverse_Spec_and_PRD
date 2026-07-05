@@ -211,6 +211,28 @@ Bash(pip3 install weasyprint *), Bash(pip3 install markdown *), Bash(pip3 instal
 
 ---
 
+## 10. 코드 감사 결과 및 수정 이력 (2026-07-05)
+
+`reverse-spec`/`reverse-prd`(및 자매 스킬 `reverse-backend`)의 실전 검증 과정에서
+발견된 코드/구조 문제를 감사하고 수정했다. 모든 수정은 mock-shop 2회 실행 SHA-256
+동일(결정성 유지) + 전체 렌더 파이프라인(PDF/HTML/DOCX) 재검증을 거쳤다.
+
+| # | 문제 | 심각도 | 수정 내용 |
+|---|------|--------|-----------|
+| 1 | DOCX 테이블에서 `\|` 이스케이프 처리가 HTML/PDF와 DOCX 경로에서 서로 달라, 조건문에 `\|\|`(JS 논리 OR)가 있으면 DOCX 테이블의 뒤 컬럼(근거 파일 등)이 통째로 사라짐 | 높음 (데이터 유실) | `extract.py`에 `_escape_cell()`(백틱 값은 이스케이프 생략), `render.py`에 백틱·이스케이프 인식 `_split_table_row()` 도입. HTML의 백슬래시 노출 버그도 함께 해소 |
+| 2 | `reverse-backend`에서 발견한 "주석 처리된 죽은 코드를 활성 정책으로 오탐" 버그가 프론트엔드용 `extract.py`에는 이식되지 않은 채 남아있었음 | 높음 (오탐) | `_blank_full_line_comments()` 추가 (`//`, 한 줄 HTML 주석 제외) 후 `read_sources()`에 적용 |
+| 3 | `fetch(...)`와 `if (...)` 정규식이 중첩 괄호(예: `.test(email)`, `JSON.stringify({...})`)에서 조기 매칭 종료 — 실제로 mock-shop의 이메일 정규식 검증 규칙이 이 버그로 누락되고 있었음 | 중간 (실측 정확도) | `_find_matching_paren()`(괄호 카운팅)으로 두 곳 모두 교체. 부수효과로 `extract_rules`/`extract_messages`의 중복 로직을 `_find_if_return_pairs()`로 통합(#6 해소) |
+| 4 | `flowgen.py`의 SVG `viewBox` 높이가 역방향(복귀) 엣지의 우회 경로 좌표와 별개 공식으로 계산돼, 노드가 많으면 엣지가 캔버스 밖으로 잘릴 수 있었음 | 낮음 | 엣지 지오메트리를 먼저 계산해 실제 필요 높이를 구한 뒤 viewBox를 확정하도록 재구성 |
+| 5 | `reference.md`가 "민감 정보는 경고로 표시"라고 선언하지만 프론트엔드 `extract.py`에는 이를 강제하는 스캔 로직이 없었음 (원칙과 구현의 불일치) | 중간 | `reverse-backend`의 검증된 시크릿 스캔 로직(`extract_secret_findings`)을 이식 — `reference.md` 1-J로 등록, 값은 절대 출력하지 않고 파일 경로·패턴 종류·git 추적 여부만 보고 |
+| 6 | `extract_rules`/`extract_messages`가 동일 정규식을 독립 구현해 한쪽만 고치면 drift 발생 | 낮음 (구조) | #3 수정 과정에서 `_find_if_return_pairs()`로 통합해 해소 |
+| 7 | `flowgen.py`에 노드 수 상한이 없어 대형 코드베이스에서 거대한 SVG가 만들어질 수 있었음 | 낮음 | `MAX_NODES = 60` 상한 추가, 초과 시 잘라내고 stderr 경고 |
+
+모든 항목은 `reverse-prd/scripts/`에서 수정 후 `reverse-spec/scripts/`로 동기화,
+`tools/check-sync.sh` 통과 확인. 저장소에 커밋된 샘플(mock-shop PRD, flow SVG)은
+수정 전후 바이트 단위로 동일함을 확인해 재생성하지 않았다(회귀 없음의 증거).
+
+---
+
 ### 출처
 
 - https://code.claude.com/docs/en/skills.md (프론트매터 필드 표, 디렉토리 구조, `${CLAUDE_SKILL_DIR}`)
