@@ -52,20 +52,46 @@ TRACKING_PATTERNS = [
 ]
 
 
+_TRAILING_COMMENT = re.compile(r"\s//")
+# `// POST /api/x` 형태의 의도적 API 문서화 표기는 유효 JS 문법이 아니라
+# 순수 주석 표기이므로, 죽은 코드(진짜 문법)와 구분해 보존해야 한다.
+# extract_api_calls의 전용 패턴이 이 표기를 찾는다.
+_API_ANNOTATION = re.compile(r"^//\s*(?:GET|POST|PUT|PATCH|DELETE)\s+/\S+")
+
+
 def _blank_full_line_comments(src: str) -> str:
-    """실전 검증 교훈(reverse-backend 자매 스킬에서 먼저 발견 후 이식): 통째로
-    주석 처리된 죽은 코드(예: `// if (!token) return "..."`, `// <RequireAuth
-    role="admin">`)가 실제 정책/화면으로 오탐되는 것을 막는다. 한 줄 전체가
-    `//`로 시작하는 라인과, 한 줄 안에서 완전히 닫히는 HTML 주석
-    (`<!-- ... -->`)만 제외한다. JSX 블록 주석(`{/* ... */}`)과 여러 줄에
-    걸친 블록 주석은 다루지 않음 — reference.md 1-I에 한계 명시."""
+    """실전 검증 교훈(reverse-backend 자매 스킬에서 먼저 발견 후 이식, 이후
+    재점검 중 트레일링 주석 사각지대와 그로 인한 API 문서화 표기 유실을
+    추가 발견): 주석 처리된 죽은 코드가 실제 정책/화면/API로 오탐되는 것을
+    막되, 의도적인 API 주석 표기(`// POST /api/x`)는 보존한다.
+
+    1. 한 줄 전체가 `//`로 시작하는 라인, 한 줄 안에서 완전히 닫히는
+       HTML 주석(`<!-- ... -->`)은 통째로 비운다 — 단 `_API_ANNOTATION`
+       형태는 예외로 보존한다.
+    2. `코드; // 주석` 형태의 **트레일링 주석**도 잘라낸다 — 재점검 중
+       `doRealThing(); // fetch("/api/fake") 예시` 같은 줄에서 주석 안의
+       가짜 API 호출이 실제 fetch처럼 오탐되는 것을 발견해 추가했다.
+       단, `//` 앞에 공백이 있을 때만 주석 시작으로 본다(URL 오손상 방지)
+       이고, 트레일링 주석이 `_API_ANNOTATION` 형태면 역시 보존한다 —
+       처음엔 이 예외 없이 구현해 mock-shop의 `await login(...); //
+       POST /api/auth/login` 같은 의도된 문서화 주석까지 함께 지워지는
+       회귀를 냈다가 재점검 중 발견해 수정했다.
+
+    한계: 문자열 리터럴 안에 우연히 " //"가 포함되면(드묾) 그 지점에서 잘릴 수
+    있고, JSX 블록 주석(`{/* ... */}`)과 여러 줄 블록 주석은 다루지 않는다
+    — reference.md 1-I에 명시."""
     out = []
     for line in src.splitlines():
         stripped = line.lstrip()
         if stripped.startswith("//"):
+            out.append(line if _API_ANNOTATION.match(stripped) else "")
+            continue
+        if stripped.startswith("<!--") and stripped.rstrip().endswith("-->"):
             out.append("")
-        elif stripped.startswith("<!--") and stripped.rstrip().endswith("-->"):
-            out.append("")
+            continue
+        m = _TRAILING_COMMENT.search(line)
+        if m and not _API_ANNOTATION.match(line[m.start() + 1:].lstrip()):
+            out.append(line[:m.start()])
         else:
             out.append(line)
     return "\n".join(out)
