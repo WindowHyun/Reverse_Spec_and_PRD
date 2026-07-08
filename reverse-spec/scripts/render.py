@@ -27,8 +27,21 @@ import re
 import sys
 
 
+def _pdf_url_fetcher(url: str, *args, **kwargs):
+    """weasyprint용 URL fetcher. 보안 검증 발견: 기본 fetcher가 file:// 스킴을
+    그대로 가져와, 분석 대상이 통제 못하는 문서에 `<link href="file:///etc/passwd">`
+    같은 참조가 있으면 로컬 파일을 읽어 PDF에 임베드할 수 있었다(정보 노출).
+    file:/ 로컬 파일 스킴은 차단하고, 그 외(https 웹폰트 등)만 기본 처리한다."""
+    from weasyprint.urls import default_url_fetcher
+    if url.lower().startswith("file:"):
+        raise ValueError(f"보안: 로컬 파일 참조 차단됨 ({url[:40]})")
+    return default_url_fetcher(url, *args, **kwargs)
+
+
 def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
     import markdown
+    # python-markdown 코어에 취소선(~~text~~)이 없어 <del>로 선치환 (HTML/PDF 공통)
+    md_text = re.sub(r"~~(.+?)~~", r"<del>\1</del>", md_text)
     body = markdown.markdown(md_text, extensions=["tables", "toc", "fenced_code"])
     return f"""<!DOCTYPE html>
 <html lang="{lang}">
@@ -72,7 +85,8 @@ def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
 
 def render_pdf(md_text: str, out_path: pathlib.Path, title: str, accent: str, lang: str) -> None:
     from weasyprint import HTML
-    HTML(string=build_html(md_text, title, accent, lang)).write_pdf(str(out_path))
+    HTML(string=build_html(md_text, title, accent, lang),
+         url_fetcher=_pdf_url_fetcher).write_pdf(str(out_path))
 
 
 def render_html(md_text: str, out_path: pathlib.Path, title: str, accent: str, lang: str) -> None:
@@ -80,22 +94,40 @@ def render_html(md_text: str, out_path: pathlib.Path, title: str, accent: str, l
     out_path.write_text(build_html(md_text, title, accent, lang), encoding="utf-8")
 
 
-_INLINE = re.compile(r"\*\*(.+?)\*\*|`(.+?)`")
+# 인라인 마크다운 → 평문 변환 규칙 (순서 중요: 이미지→링크 순).
+_IMG = re.compile(r"!\[([^\]]*)\]\([^)]*\)")           # ![alt](url) → alt
+_LINK = re.compile(r"\[([^\]]+)\]\([^)]*\)")            # [text](url) → text
+_BOLD = re.compile(r"\*\*(.+?)\*\*")
+_STRIKE = re.compile(r"~~(.+?)~~")
+_CODE = re.compile(r"`+([^`]+)`+")                      # `code` / ``code`` 모두
 
 
 def _clean_inline(text: str) -> str:
-    """docx 평문용: **bold**/`code` 마크업 기호를 제거하고, 이스케이프된
-    파이프(\\|)를 리터럴 |로 되돌린다 (extract.py의 _escape_cell과 짝을 이룸)."""
-    text = _INLINE.sub(lambda m: m.group(1) or m.group(2), text)
-    return text.replace("\\|", "|")
+    """docx 평문용: 인라인 마크다운 기호(**bold**, `code`, [링크](url),
+    ![이미지](url), ~~취소선~~)를 제거하고, 이스케이프된 파이프(\\|)와
+    _escape_cell이 넣은 HTML 엔티티(&lt; 등)를 리터럴로 되돌린다.
+    (렌더링 검증 발견: 링크/이미지/취소선이 원문 기호 그대로 노출되던 문제 수정.)"""
+    text = _IMG.sub(r"\1", text)
+    text = _LINK.sub(r"\1", text)
+    text = _BOLD.sub(r"\1", text)
+    text = _STRIKE.sub(r"\1", text)
+    text = _CODE.sub(r"\1", text)
+    text = text.replace("<br/>", "\n").replace("<br>", "\n")
+    text = text.replace("\\|", "|")
+    # _escape_cell의 HTML 엔티티를 Word용 리터럴로 복원 (&amp; 는 마지막에)
+    text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+    return text
 
 
 def _split_table_row(line: str) -> list:
     """GFM 파이프 테이블 행을 셀로 분리한다. 백틱(코드 스팬) 안의 파이프와
-    백슬래시로 이스케이프된 파이프(\\|)는 구분자로 보지 않는다 — 기존의 단순
+    백슬래시로 이스케이프된 파이프(\\|)는 구분자로 보지 않는다 — 단순
     line.split("|")는 이 두 경우를 무시해 JS `a || b` 같은 조건문이 들어간
-    셀에서 뒤 컬럼(근거 파일 등)이 통째로 사라지는 버그가 있었다 (실전 검증 발견)."""
-    cells, buf, in_backtick, i = [], [], False, 0
+    셀에서 뒤 컬럼이 사라지는 버그가 있었다 (실전 검증 발견).
+    렌더링 검증 추가 발견: 백틱을 단순 토글로 처리하면 이중 백틱(``code``)에서
+    깨졌으므로, 연속 백틱 런(run) 길이가 같은 쌍으로 코드 스팬을 닫는다."""
+    cells, buf, i = [], [], 0
+    backtick_run = 0  # 0이면 코드스팬 밖, >0이면 그 길이의 런으로 열린 상태
     while i < len(line):
         ch = line[i]
         if ch == "\\" and i + 1 < len(line) and line[i + 1] == "|":
@@ -103,9 +135,18 @@ def _split_table_row(line: str) -> list:
             i += 2
             continue
         if ch == "`":
-            in_backtick = not in_backtick
-            buf.append(ch)
-        elif ch == "|" and not in_backtick:
+            j = i
+            while j < len(line) and line[j] == "`":
+                j += 1
+            run = j - i
+            if backtick_run == 0:
+                backtick_run = run           # 코드 스팬 열기
+            elif backtick_run == run:
+                backtick_run = 0             # 같은 길이 런으로 닫기
+            buf.append(line[i:j])
+            i = j
+            continue
+        if ch == "|" and backtick_run == 0:
             cells.append("".join(buf))
             buf = []
         else:
@@ -119,6 +160,17 @@ def _split_table_row(line: str) -> list:
     if stripped.endswith("|") and cells and cells[-1].strip() == "":
         cells = cells[:-1]
     return [c.strip() for c in cells]
+
+
+def _add_list_para(doc, text: str, base_style: str, nest: int):
+    """중첩 레벨(nest)에 맞는 리스트 스타일을 적용하되, 해당 스타일이 문서
+    템플릿에 없으면 기본 스타일로 안전 폴백한다 ('List Bullet 2' 등이 없는
+    템플릿에서 KeyError로 죽지 않도록)."""
+    style = base_style if nest == 0 else f"{base_style} {nest + 1}"
+    try:
+        doc.add_paragraph(text, style=style)
+    except KeyError:
+        doc.add_paragraph(text, style=base_style)
 
 
 def render_docx(md_text: str, out_path: pathlib.Path, title: str) -> None:
@@ -195,11 +247,11 @@ def render_docx(md_text: str, out_path: pathlib.Path, title: str) -> None:
             i += 1
             continue
 
-        # 헤딩
-        m = re.match(r"^(#{1,4})\s+(.*)$", stripped)
+        # 헤딩 (H1~H6 — 렌더링 검증 발견: #{1,4}라 #####/###### 가 문단으로 강등됐음)
+        m = re.match(r"^(#{1,6})\s+(.*)$", stripped)
         if m:
             level = len(m.group(1))
-            doc.add_heading(_clean_inline(m.group(2)), level=min(level, 4))
+            doc.add_heading(_clean_inline(m.group(2)), level=min(level, 6))
             i += 1
             continue
 
@@ -210,10 +262,24 @@ def render_docx(md_text: str, out_path: pathlib.Path, title: str) -> None:
             i += 1
             continue
 
+        # 들여쓰기 기반 중첩 리스트 레벨 (렌더링 검증 발견: strip 후 검사해 중첩
+        # 정보가 사라지고 모두 같은 레벨로 평탄화됐음 — 원본 라인의 선행 공백으로
+        # 레벨을 계산한다). 공백 2칸 = 1레벨.
+        indent = len(line) - len(line.lstrip(" "))
+        nest = min(indent // 2, 2)  # docx 기본 List 스타일은 3레벨까지
+
+        # 번호 목록 (1. 2. …) — 렌더링 검증 발견: 어떤 분기에도 안 걸려 문단으로
+        # 강등되며 Word 자동번호가 사라졌음
+        mo = re.match(r"^\d+\.\s+(.*)$", stripped)
+        if mo:
+            _add_list_para(doc, _clean_inline(mo.group(1)), "List Number", nest)
+            i += 1
+            continue
+
         # 불릿/체크리스트
         if re.match(r"^[-*]\s+", stripped):
             text = re.sub(r"^[-*]\s+", "", stripped)
-            doc.add_paragraph(_clean_inline(text), style="List Bullet")
+            _add_list_para(doc, _clean_inline(text), "List Bullet", nest)
             i += 1
             continue
 

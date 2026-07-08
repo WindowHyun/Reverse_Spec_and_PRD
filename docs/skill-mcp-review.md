@@ -271,6 +271,55 @@ API 문서화 주석 2건(로그인·주문 엔드포인트)은 정상 복원, 2
 
 ---
 
+## 12. 멀티에이전트 코드 감사 결과 및 수정 (2026-07-08)
+
+5개 관점(정확성·보안·결정성·일관성·렌더링)의 에이전트가 병렬로 코드를 검토하고,
+각 발견을 2인 독립 에이전트가 재검증(refute 투표)했다 — 총 83개 에이전트, 39건 발견
+→ **36건 확정 / 3건 기각**. 확정 항목을 우선순위대로 전부 수정했다. 모든 수정은
+mock-shop 2회 실행 SHA-256 동일(결정성 유지) + PDF/HTML/DOCX 파이프라인 재검증을 거쳤다.
+
+**HIGH — 정확성 (extract.py)**
+- `if (cond) { return "…" }` 중괄호 블록형 early-return 미매칭 → `_find_if_return_pairs`가
+  `{` 블록·단따옴표·템플릿 리터럴까지 인식하도록 개선(extract_rules/extract_messages 공용).
+- `useContext(ctx)`/`useSelector(fn)` 등 **인자 있는 훅 전량 누락** → 인자 유무·구조분해/
+  단일변수 무관하게 포착.
+- JSX `<Route element={<RequireAuth…}>` 가드 미스트리핑(컴포넌트를 RequireAuth로,
+  보호를 public으로 오보고) → `_component_and_guard` 헬퍼로 createBrowserRouter 경로와
+  통합, 래퍼(RequireAuth/Layout 등) 건너뛰고 실제 페이지 컴포넌트 선택.
+- vue-router 정규식이 `meta:{…}` 중첩·lazy import에서 매칭 실패 → 개선.
+- named export/import 컴포넌트(`export const Foo`, `import { Foo }`) 전량 누락 → 포착.
+
+**HIGH — 보안**
+- render.py 출력 HTML 미정제(저장형 XSS): 추출 문자열의 `<img onerror=…>`가 그대로
+  실행될 수 있었음 → `_escape_cell`이 백틱 밖 텍스트의 `<>&`를 HTML 이스케이프,
+  DOCX 경로는 `_clean_inline`이 리터럴로 복원.
+- weasyprint가 `file://` 로컬 파일 fetch 허용(정보 노출) → `_pdf_url_fetcher`로 file: 차단.
+- extract.py가 심볼릭 링크를 따라가 저장소 밖 파일 읽기 → `_walk_safe_files`로 심링크
+  스킵 + resolve() 경로가 root 하위인지 검증.
+
+**HIGH — 결정성/일관성/렌더링**
+- 스냅샷 축약 해시 `%h` → 전체 해시 `%H` (clone/설정 무관 결정성).
+- reference.md 1-A~1-G의 문서-코드 불일치 → ⚙️(파서 자동)/✍️(LLM 보완) 구분을
+  전 항목에 표기해 정직하게 정합. 1-J를 1-I 뒤로 재배치.
+- `_split_table_row` 이중 백틱(``code``) 오파싱으로 컬럼 소실 → 백틱 런 길이 매칭.
+- DOCX 헤딩 `#{1,4}` → `#{1,6}` (H5/H6 강등 수정).
+
+**MEDIUM/LOW (요약)**
+- 트래킹 벤더+generic 이중매칭 제거(first-match-wins) · `disabled={}` 중첩 중괄호
+  브레이스 매칭 · JSX 줄바꿈 텍스트/조건부 문자열 포착 · axios 인스턴스 호출 포착 ·
+  음수 상수 · min/max 순서·인접 무관 · `.env*` 변형/`.vue` 시크릿 스캔 포함 ·
+  번호목록/중첩리스트 스타일 · 링크/이미지/취소선 평문화 · `<br>` DOCX 개행 ·
+  flowgen 고립 사이클 노드를 진입 컬럼과 분리 · 정렬 tie-break 키 보강 ·
+  argument-hint에 `html` 추가.
+
+**기각 3건**: git subprocess timeout 비결정성(발동 비현실적) · flowgen 복수 진입점
+depth(문서화된 의도된 설계) · render.py argparse 기본값(항상 명시적 인자 전달로 무영향).
+
+> 이번 감사의 핵심 패턴: "한 곳에서 고친 버그가 형제 코드 경로엔 미적용"(중첩괄호·
+> 가드 스트리핑)이 반복 확인됨. 단일 헬퍼로 통합해 재발 방지.
+
+---
+
 ### 출처
 
 - https://code.claude.com/docs/en/skills.md (프론트매터 필드 표, 디렉토리 구조, `${CLAUDE_SKILL_DIR}`)

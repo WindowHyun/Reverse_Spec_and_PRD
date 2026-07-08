@@ -6,6 +6,14 @@
 - 추출은 "있는 그대로의 원자료"만 모은다. 의미 해석(정책 규칙화 / 요구사항화)은
   각 스킬의 **Step 2**에서 목적에 맞게 수행한다.
 
+> **⚙️ 파서 자동 / ✍️ LLM 보완 구분 (중요)**
+> 이 문서는 Phase 1의 **추출 대상 전체**를 정의한다. 그중 상당수는 `scripts/extract.py`
+> (파서)가 결정적으로 자동 추출하지만(⚙️), 정규식으로 안정적으로 잡기 어려운 항목은
+> 파서가 다루지 않으며 LLM이 Step 1 보완 단계에서 코드를 직접 읽어 채운다(✍️).
+> 아래 각 항목에 ⚙️/✍️를 표기했다. ✍️ 항목은 파서 출력(`_facts.md`)에 없으므로,
+> LLM이 보완할 때 `[파서 미탐지 — 수동 확인]` 태그를 붙인다. (코드 감사에서 "문서에는
+> 있으나 코드에 없다"고 지적된 항목들을 이 구분으로 정직하게 반영했다.)
+
 ---
 
 ## 0. 파일 탐색 우선순위
@@ -27,11 +35,12 @@
 
 ```
 추출 대상:
-- <nav> 내부 <a href>, <Link to>, <router-link to>
-- React Router / Vue Router의 routes 배열
-- Next.js pages/ 디렉토리 구조
-- 앵커 href의 #섹션ID (단일 페이지 문서)
-- 라우트의 인증/권한 가드 (RequireAuth, beforeEnter, middleware 등)
+⚙️ React Router createBrowserRouter/createHashRouter, <Route element={...}>
+⚙️ Vue Router routes 배열 (path/component, meta 중첩·lazy import 포함)
+⚙️ 라우트의 RequireAuth/role 가드 (JSX 래퍼)
+✍️ <nav> 내부 <a href>, <Link to>, <router-link to>, 앵커 #섹션ID (단일 페이지)
+✍️ Next.js pages/·app/ 파일 기반 라우팅
+✍️ Vue beforeEnter / Next.js middleware 기반 가드
 
 추출 형식:
   [depth] path → 화면명 [보호여부]  (예: [1] /checkout → 결제화면 [로그인필요])
@@ -41,9 +50,10 @@
 
 ```
 추출 대상:
-- export default / export function 으로 시작하는 컴포넌트
-- class명, id명에서 화면 의미 추론
-- placeholder, aria-label, title 속성 → 사용자에게 보이는 기능 단서
+⚙️ default/named export 컴포넌트(PascalCase), default/named 상대경로 import
+   → 소스 포함 여부(분석 가능/import만)까지 판정
+✍️ class명·id명에서 화면 의미 추론
+   (placeholder, aria-label, title 등 UI 속성은 1-E 메시지 카탈로그에서 수집)
 
 추출 형식:
   컴포넌트명 → 추정 역할 (예: LoginForm → 로그인 폼)
@@ -68,9 +78,9 @@
 
 ```
 추출 대상:
-- navigate(), router.push(), window.location
-- 모달 open/close 트리거
-- 탭 전환, 단계(step) 이동, 결제/가입 등 퍼널 단계
+⚙️ navigate(), router.push(), <Navigate to>, window.location 할당
+✍️ 모달 open/close 트리거
+✍️ 탭 전환, 단계(step) 이동, 결제/가입 등 퍼널 단계
 
 추출 형식:
   출발화면 → [트리거조건] → 도착화면
@@ -80,11 +90,12 @@
 
 ```
 추출 대상:
-- alert(), confirm(), toast 계열 호출의 문자열 인자
-- 검증 함수가 return하는 에러 메시지 문자열
-- 빈 상태 문구 (items.length === 0 분기의 JSX 텍스트 등)
-- placeholder, aria-label, 버튼 라벨 등 UI 문구
-- i18n 키가 있으면 키와 기본 문구를 함께 수록
+⚙️ alert() 호출의 문자열 인자
+⚙️ 검증 함수가 return하는 에러 메시지 문자열, setError() 인자
+⚙️ placeholder, aria-label 속성
+⚙️ JSX 텍스트 노드(빈 상태 문구 포함), {cond && "…"} / 삼항 조건부 문자열
+✍️ confirm()/toast 계열 등 그 외 알림 API
+✍️ i18n 키가 있으면 키와 기본 문구를 함께 수록 (t(...)/useTranslation)
 
 추출 형식:
   [ID | 문구(코드 원문 그대로) | 유형(에러/안내/빈상태/확인) | 노출 조건 | 근거 파일]
@@ -96,9 +107,9 @@
 
 ```
 추출 대상:
-- Context/Provider, redux slice, zustand/pinia store 정의
-- 커스텀 훅(useAuth, useCart 등)이 노출하는 상태와 액션
-- 각 화면(컴포넌트)이 어떤 상태를 읽는지/쓰는지
+⚙️ createContext/createStore/defineStore/createSlice 정의
+⚙️ use*() 훅 사용(구조분해/단일변수, 인자 유무 무관 — useSelector/useContext 포함)
+✍️ 각 화면(컴포넌트)이 어떤 상태를 읽는지/쓰는지의 세부 매핑
 
 추출 형식:
   상태 단위 → 보유 필드/액션 → [읽는 화면들] / [쓰는 화면들]
@@ -108,11 +119,11 @@
 
 ```
 추출 대상:
-- package.json dependencies 중 서드파티 서비스 SDK
-  (결제 PG, 소셜 로그인, 지도, 분석, 채팅/CS, 푸시 등)
-- 서드파티 도메인으로의 fetch/스크립트 로드
-- 트래킹 호출: gtag(), ga(), amplitude.track(), mixpanel.track(),
+⚙️ package.json dependencies 중 서드파티 서비스 SDK
+  (프레임워크/유틸 제외, 결제 PG·소셜 로그인·지도·분석·채팅 등)
+⚙️ 트래킹 호출: gtag(), ga(), amplitude.track(), mixpanel.track(),
   dataLayer.push(), 커스텀 track()/logEvent() 등
+✍️ 서드파티 도메인으로의 fetch/<script src> 로드 분류
 
 추출 형식:
   연동: [대상 서비스 | 용도 | 사용 위치(파일) | 근거(패키지명/import)]
@@ -123,32 +134,14 @@
 
 ```
 수집 대상:
-- git 저장소면: git rev-parse HEAD (커밋 해시), git log -1 --format=%ci (시점)
+- git 저장소면: git log -1 --format=%H (전체 커밋 해시), %ci (시점)
+  ※ 축약 해시 %h는 clone 방식/core.abbrev에 따라 값이 달라져 결정성을 해치므로 전체 해시 사용
 - 분석에 실제 포함된 파일 목록 (경로 정렬)
 - git이 아니면 파일 목록 + 수정 시각만 기록
 
 기록 위치: 문서 1장(Overview)의 As-Is 스냅샷 절.
 목적: 이후 코드가 변경됐을 때 "이 문서가 유효한 기준 시점"을 판정.
 ```
-
-## 1-J. 하드코딩 시크릿 노출 스캔 (reverse-backend에서 이식)
-
-```
-추출 대상 (실제 값은 절대 열람·출력하지 않고 "발견 위치"만 보고):
-- 파일명 기반: secrets.json, credentials.json, .env, *.pem, *.key, id_rsa
-- 코드 내 키 접두어 패턴: AKIA... (AWS), AIza... (Google), sk_live_/sk_test_
-  (Stripe), ghp_/gho_ (GitHub), xox[baprs]- (Slack)
-- git 추적 대상이면 이미 커밋 이력에 남았다는 뜻이므로 위험도를 더 높게 표기
-
-보고 형식 (문서에는 이렇게만 기재, 값 자체는 절대 포함 금지):
-  ⚠️ [파일 경로] — [패턴 종류] 발견, git 추적 여부: [예/아니오] — 즉시 확인 및 로테이션 권고
-```
-
-> 이 규칙은 `reverse-backend`(자매 스킬)에서 실전 코드베이스 검증 중 처음
-> 구현·확인된 뒤 이식되었다. 이전에는 "민감 정보는 문서에 포함하지 않고
-> 경고로 표시한다"는 원칙(2장)이 선언만 있고 이를 강제하는 도구가 없었다.
-
----
 
 ## 1-I. 알려진 파서 커버리지 한계 (중요)
 
@@ -158,6 +151,9 @@
 - Vue `<script setup>` 문법, Svelte 컴포넌트
 - styled-components/emotion 등 CSS-in-JS 기반 상태·문구
 - Redux Toolkit 외의 커스텀 상태관리 패턴, 비표준 훅 네이밍(`use[A-Z]` 밖의 이름)
+- **JSX 블록 주석(`{/* ... */}`)과 여러 줄에 걸친 블록 주석(`/* ... */`)**: 한 줄
+  주석(`//`)과 트레일링 주석은 제거하지만 블록 주석 안의 죽은 코드는 남아 오탐될 수 있음
+- 위 `## 1-A`~`1-G`에서 **✍️로 표시된 항목**(파서 미구현, LLM 수동 보완 대상)
 
 **추출 통계가 비정상적으로 낮으면(예: 라우트 0 · 컴포넌트 0인데 명백히 화면이 있는 코드)
 파서가 해당 코드의 패턴을 못 잡은 것으로 간주**하고, Step 1에서 다음을 수행한다:
@@ -168,6 +164,26 @@
 
 이 스킬은 몇 가지 프레임워크로만 실전 검증되었으며, 위 목록에 없는 스택에서도
 동일한 원칙(비정상적으로 낮은 통계 → 수동 보완 + 경고)을 적용한다.
+
+## 1-J. 하드코딩 시크릿 노출 스캔 (reverse-backend에서 이식)
+
+```
+추출 대상 (실제 값은 절대 열람·출력하지 않고 "발견 위치"만 보고):
+- 파일명 기반: secrets.json, credentials.json, .env(.env.local/.env.production 등
+  .env* 변형 포함), *.pem, *.key, id_rsa
+- 코드 내 키 접두어 패턴: AKIA... (AWS), AIza... (Google), sk_live_/sk_test_
+  (Stripe), ghp_/gho_ (GitHub), xox[baprs]- (Slack)
+- 스캔 대상 확장자: .ts/.tsx/.js/.jsx/.vue/.json/.yml/.yaml
+- git 추적 대상이면 이미 커밋 이력에 남았다는 뜻이므로 위험도를 더 높게 표기
+- 심볼릭 링크는 따라가지 않는다(저장소 밖 파일 접근 차단)
+
+보고 형식 (문서에는 이렇게만 기재, 값 자체는 절대 포함 금지):
+  ⚠️ [파일 경로] — [패턴 종류] 발견, git 추적 여부: [예/아니오] — 즉시 확인 및 로테이션 권고
+```
+
+> 이 규칙은 `reverse-backend`(자매 스킬)에서 실전 코드베이스 검증 중 처음
+> 구현·확인된 뒤 이식되었다. 이전에는 "민감 정보는 문서에 포함하지 않고
+> 경고로 표시한다"는 원칙(2장)이 선언만 있고 이를 강제하는 도구가 없었다.
 
 ## 2. 범위·정확성 표기 규칙 (필수)
 

@@ -4,7 +4,7 @@ description: >
   코드(HTML/JS/TS/Vue/React)를 분석해서 역기획 정책서(PDF 또는 docx)를 자동 생성한다.
   사용자가 "역기획", "정책서", "스펙 문서", "코드 분석해서 문서화" 등을 요청할 때 자동 실행.
   인자로 파일 경로 또는 디렉토리를 받는다.
-argument-hint: <파일_또는_디렉토리_경로> [--format pdf|docx] [--lang ko|en]
+argument-hint: <파일_또는_디렉토리_경로> [--format pdf|docx|html] [--lang ko|en]
 allowed-tools: >
   Read, Glob, Write,
   Bash(find *), Bash(ls *),

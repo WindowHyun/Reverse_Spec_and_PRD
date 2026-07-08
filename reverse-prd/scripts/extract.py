@@ -26,6 +26,12 @@ import sys
 
 SRC_EXT = (".tsx", ".ts", ".jsx", ".js", ".vue", ".html")
 
+# 라우트 element를 감싸는 흔한 래퍼/HOC — 페이지 컴포넌트 판정 시 건너뛴다.
+WRAPPER_COMPONENTS = {
+    "RequireAuth", "ProtectedRoute", "PrivateRoute", "AuthGuard", "Suspense",
+    "ErrorBoundary", "Layout", "AppLayout", "MainLayout", "Fragment",
+}
+
 SECRET_FILENAMES = {"secrets.json", "credentials.json", "id_rsa", "id_rsa.pub"}
 SECRET_SUFFIXES = (".pem", ".key")
 SECRET_KEY_PATTERNS = [
@@ -97,11 +103,35 @@ def _blank_full_line_comments(src: str) -> str:
     return "\n".join(out)
 
 
-def read_sources(root: pathlib.Path) -> dict:
-    files = {}
+def _is_within(root: pathlib.Path, p: pathlib.Path) -> bool:
+    """p의 실제 경로(심볼릭 링크 해석 후)가 root 하위에 있는지 확인.
+    보안 검증 발견: rglob/is_file은 심볼릭 링크를 따라가므로, root 하위처럼
+    보이는 심링크로 root 밖 임의 파일을 읽을 수 있었다 — resolve()로 실제
+    경로를 확인해 저장소 밖 파일 접근을 차단한다."""
+    try:
+        rp = root.resolve()
+        rr = p.resolve()
+        return rr == rp or rp in rr.parents
+    except (OSError, RuntimeError):
+        return False
+
+
+def _walk_safe_files(root: pathlib.Path):
+    """root 하위 파일을 순회하되 심볼릭 링크(파일/디렉토리)는 건너뛴다.
+    보안: 심링크 추적으로 저장소 밖 파일을 읽는 것을 원천 차단."""
     for p in sorted(root.rglob("*")):
+        if p.is_symlink():
+            continue
         if not p.is_file():
             continue
+        if not _is_within(root, p):
+            continue
+        yield p
+
+
+def read_sources(root: pathlib.Path) -> dict:
+    files = {}
+    for p in _walk_safe_files(root):
         if any(part in ("node_modules", ".git", "dist", "build") for part in p.parts):
             continue
         if p.suffix in SRC_EXT or p.name == "package.json":
@@ -117,6 +147,32 @@ def read_sources(root: pathlib.Path) -> dict:
 
 # ── 1-A. 라우트 ──────────────────────────────────────────────
 
+def _component_and_guard(elem_str: str) -> tuple:
+    """JSX element 문자열에서 (페이지 컴포넌트명, 보호등급)을 파싱한다.
+    보안 검증 발견: JSX <Route> 경로에는 createBrowserRouter 쪽에만 있던
+    RequireAuth 가드 스트리핑이 빠져 있어, 가드로 감싼 라우트가 컴포넌트를
+    'RequireAuth'로, 보호를 'public'으로 잘못 보고했다(정반대). 이 헬퍼로
+    두 경로가 동일 로직을 공유하게 통합했다.
+    또한 <RequireAuth><Layout><Page/></Layout> 처럼 래퍼가 겹칠 때 첫 태그가
+    래퍼면 건너뛰고 실제 페이지 컴포넌트를 고른다(WRAPPER_COMPONENTS)."""
+    guard = "public"
+    m_role = re.search(r'<RequireAuth\s+role="([^"]+)"', elem_str)
+    if m_role:
+        guard = f"role:{m_role.group(1)}"
+    elif "<RequireAuth" in elem_str:
+        guard = "login"
+    tags = re.findall(r"<([A-Za-z]\w*)\b", elem_str)
+    page = next((t for t in tags if t not in WRAPPER_COMPONENTS), None)
+    if page is None:
+        page = tags[0] if tags else "?"
+    return page, guard
+
+
+def _basename_no_ext(path: str) -> str:
+    base = path.rstrip("/").split("/")[-1]
+    return base.split(".")[0] or path
+
+
 def extract_routes(files: dict) -> list:
     routes = []
     for fname, src in files.items():
@@ -125,40 +181,57 @@ def extract_routes(files: dict) -> list:
                 m_path = re.search(r'path:\s*"([^"]+)"', block)
                 if not m_path:
                     continue
-                stripped = block.replace("RequireAuth", "", 1) if "<RequireAuth" in block else block
-                m_elem = re.search(r"<(\w+)\s*/?>", stripped)
-                guard = "public"
-                m_role = re.search(r'<RequireAuth\s+role="([^"]+)"', block)
-                if m_role:
-                    guard = f"role:{m_role.group(1)}"
-                elif "<RequireAuth" in block:
-                    guard = "login"
-                routes.append({"path": m_path.group(1),
-                               "component": m_elem.group(1) if m_elem else "?",
+                component, guard = _component_and_guard(block)
+                routes.append({"path": m_path.group(1), "component": component,
                                "guard": guard, "source": fname})
-        # React Router JSX / Vue Router routes 배열
-        for m in re.finditer(r'<Route\s+path="([^"]+)"\s+element=\{<(\w+)', src):
-            routes.append({"path": m.group(1), "component": m.group(2),
-                           "guard": "public", "source": fname})
+        # React Router JSX: element={ ... } 전체를 캡처해 가드/컴포넌트 파싱
+        for m in re.finditer(r'<Route\s+path="([^"]+)"\s+element=\{(.*?)\}\s*/?>', src, re.S):
+            component, guard = _component_and_guard(m.group(2))
+            routes.append({"path": m.group(1), "component": component,
+                           "guard": guard, "source": fname})
+        # Vue Router: path와 component 사이에 meta:{...} 등 중첩 객체가 있어도
+        # 매칭되도록, 그리고 lazy-load(() => import("..."))도 잡도록 개선.
         if "vue-router" in src or "createRouter" in src:
-            for m in re.finditer(r"path:\s*['\"]([^'\"]+)['\"][^}]*?component:\s*(\w+)", src, re.S):
-                routes.append({"path": m.group(1), "component": m.group(2),
+            for m in re.finditer(
+                    r"path:\s*['\"]([^'\"]+)['\"][\s\S]{0,300}?component:\s*"
+                    r"(?:\(\)\s*=>\s*import\(\s*['\"]([^'\"]+)['\"]|(\w+))", src):
+                if m.group(3):
+                    component = m.group(3)
+                else:
+                    component = _basename_no_ext(m.group(2))
+                routes.append({"path": m.group(1), "component": component,
                                "guard": "public", "source": fname})
     uniq = {(r["path"], r["source"]): r for r in routes}
-    return sorted(uniq.values(), key=lambda r: r["path"])
+    return sorted(uniq.values(), key=lambda r: (r["path"], r["source"]))
 
 
 # ── 1-B. 컴포넌트 ────────────────────────────────────────────
 
 def extract_components(files: dict) -> list:
+    """컴포넌트(PascalCase)의 정의/참조를 수집한다. 정확성 검증 발견: 이전에는
+    default export/import만 인식해 `export const Foo = () => ...`,
+    `export function Foo()` 같은 named-export 컴포넌트와 `import { Foo }` 같은
+    named import가 표에 아예 나타나지 않았다 — named 형태도 함께 인식한다.
+    (소문자 시작 이름은 유틸/훅으로 보고 제외해 노이즈를 줄인다.)"""
     defined, referenced = {}, set()
     for fname, src in files.items():
-        for m in re.finditer(r"export\s+default\s+function\s+(\w+)", src):
+        # default export
+        for m in re.finditer(r"export\s+default\s+function\s+([A-Z]\w*)", src):
             defined[m.group(1)] = fname
-        for m in re.finditer(r"export\s+default\s+(\w+)\s*;", src):
+        for m in re.finditer(r"export\s+default\s+([A-Z]\w*)\s*;", src):
             defined.setdefault(m.group(1), fname)
-        for m in re.finditer(r'import\s+(\w+)\s+from\s+["\']\.{1,2}/', src):
+        # named export: export const/function/class Foo (PascalCase만)
+        for m in re.finditer(r"export\s+(?:const|let|var|function|class)\s+([A-Z]\w*)", src):
+            defined.setdefault(m.group(1), fname)
+        # default import: import Foo from './...'
+        for m in re.finditer(r'import\s+([A-Z]\w*)\s+from\s+["\']\.{1,2}/', src):
             referenced.add(m.group(1))
+        # named import: import { Foo, Bar } from './...' (상대경로 한정)
+        for m in re.finditer(r'import\s+\{([^}]+)\}\s+from\s+["\']\.{1,2}/', src):
+            for name in m.group(1).split(","):
+                name = name.split(" as ")[0].strip()
+                if re.match(r"^[A-Z]\w*$", name):
+                    referenced.add(name)
     rows = []
     for name in sorted(referenced | set(defined)):
         rows.append({"name": name, "source": defined.get(name, ""),
@@ -168,21 +241,23 @@ def extract_components(files: dict) -> list:
 
 # ── 1-C. API / 상수 / 검증·차단 규칙 ─────────────────────────
 
-def _find_matching_paren(src: str, open_idx: int) -> int:
-    """open_idx는 여는 '(' 위치. 중첩 괄호까지 셈해 대응하는 닫는 ')' 인덱스를
-    반환한다 (문자열 리터럴 안의 괄호는 구분하지 않는 근사치). 실전 검증 발견:
-    `fetch(url, { body: JSON.stringify({...}) })`처럼 옵션 안에 중첩 괄호가
-    있으면 non-greedy `.*?\\)` 정규식이 첫 ')'에서 조기 종료돼 method 등을
-    놓칠 수 있어, 괄호 카운팅으로 전체 호출 범위를 정확히 찾도록 교체."""
+def _find_matching(src: str, open_idx: int, open_ch: str, close_ch: str) -> int:
+    """open_idx의 여는 괄호에 대응하는 닫는 괄호 인덱스를 중첩까지 셈해 찾는다."""
     depth = 0
     for i in range(open_idx, len(src)):
-        if src[i] == "(":
+        if src[i] == open_ch:
             depth += 1
-        elif src[i] == ")":
+        elif src[i] == close_ch:
             depth -= 1
             if depth == 0:
                 return i
     return -1
+
+
+def _find_matching_paren(src: str, open_idx: int) -> int:
+    """`(`에 대응하는 `)` 인덱스. 중첩 괄호 안전 (실전 검증에서 fetch(...) /
+    if(...) 정규식의 조기종료 버그를 잡기 위해 도입)."""
+    return _find_matching(src, open_idx, "(", ")")
 
 
 def extract_api_calls(files: dict) -> list:
@@ -197,28 +272,40 @@ def extract_api_calls(files: dict) -> list:
             if m_method:
                 method = m_method.group(1)
             calls.append({"endpoint": m.group(1), "method": method, "source": fname})
+        # axios.get(...) 직접 호출 + `const api = axios.create(); api.get("/x")` 처럼
+        # 인스턴스를 통한 호출(정확성 검증 발견 — baseURL/인터셉터 설정 시 표준 패턴)도
+        # 첫 인자가 경로/URL 문자열인 .메서드( 호출로 포착한다.
         for m in re.finditer(r"\baxios\.(get|post|put|patch|delete)\(\s*[\'\"`]([^\'\"`]+)", src):
             calls.append({"endpoint": m.group(2), "method": m.group(1).upper(), "source": fname})
+        for m in re.finditer(
+                r"\b\w+\.(get|post|put|patch|delete)\(\s*[\'\"`]"
+                r"(/[^\'\"`]*|https?://[^\'\"`]+)", src):
+            calls.append({"endpoint": m.group(2), "method": m.group(1).upper(),
+                          "source": fname})
         for m in re.finditer(r"//\s*(GET|POST|PUT|PATCH|DELETE)\s+(/\S+)", src):
             calls.append({"endpoint": m.group(2), "method": m.group(1),
                           "source": fname + " (주석)"})
     uniq = {(c["endpoint"], c["method"]): c for c in calls}
-    return sorted(uniq.values(), key=lambda c: (c["endpoint"], c["method"]))
+    return sorted(uniq.values(), key=lambda c: (c["endpoint"], c["method"], c["source"]))
 
 
 def extract_constants(files: dict) -> list:
     consts = []
     for fname, src in files.items():
-        for m in re.finditer(r"const\s+([A-Z][A-Z0-9_]+)\s*=\s*([\d_.]+)", src):
+        # 음수 상수도 포함 (정확성 검증 발견: -?가 없어 음수는 매칭 자체가 실패했음)
+        for m in re.finditer(r"const\s+([A-Z][A-Z0-9_]+)\s*=\s*(-?[\d_.]+)", src):
             consts.append({"name": m.group(1), "value": m.group(2), "source": fname})
     return sorted(consts, key=lambda c: (c["name"], c["source"]))
 
 
 def _find_if_return_pairs(src: str) -> list:
     """`if (조건) return "메시지"` 패턴을 중첩 괄호까지 고려해 찾는다.
-    extract_rules와 extract_messages가 이 로직을 각자 따로 구현하면서
-    한쪽만 고쳐 결과가 어긋나는(drift) 위험이 있어 공용 헬퍼로 통합했다
-    (실전 검증에서 fetch()와 동일한 중첩괄호 버그가 여기서도 발견된 뒤 정리)."""
+    extract_rules와 extract_messages가 공유하는 헬퍼(중복 로직 통합).
+
+    정확성 검증 발견 후 개선:
+    - 중괄호 블록형 early-return `if (cond) { return "msg" }` 지원
+      (Prettier/ESLint curly 규칙상 오히려 주류 스타일인데 누락되고 있었음).
+    - 단따옴표/템플릿 리터럴 return 문자열도 지원(이전엔 큰따옴표만)."""
     pairs = []
     for m in re.finditer(r"if\s*\(", src):
         paren_idx = src.index("(", m.start())
@@ -226,9 +313,11 @@ def _find_if_return_pairs(src: str) -> list:
         if close_idx == -1:
             continue
         condition = src[paren_idx + 1:close_idx].strip()
-        m2 = re.match(r'\s*return\s*"([^"]+)"', src[close_idx + 1:close_idx + 300])
+        # `)` 다음에 (선택적 `{` 블록 후) return "…"/'…'/`…` 이 오는지 확인
+        m2 = re.match(r'\s*\{?\s*return\s+(["\'`])(.*?)\1',
+                      src[close_idx + 1:close_idx + 400], re.S)
         if condition and m2:
-            pairs.append((condition, m2.group(1)))
+            pairs.append((condition, m2.group(2).strip()))
     return pairs
 
 
@@ -238,16 +327,26 @@ def extract_rules(files: dict) -> list:
         for condition, message in _find_if_return_pairs(src):
             rules.append({"kind": "입력 검증", "condition": condition,
                           "effect": f'메시지 "{message}"', "source": fname})
-        for m in re.finditer(r"min=\{(\w+)\}\s+max=\{([\w.]+)\}", src):
+        # min/max는 순서·인접에 무관하게(사이에 다른 속성 허용, 역순 허용) 잡는다
+        for m in re.finditer(r"min=\{(\w+)\}[^>]*?max=\{([\w.]+)\}", src):
             rules.append({"kind": "범위 제한", "condition": f"min {m.group(1)} / max {m.group(2)}",
                           "effect": "입력값 범위 강제", "source": fname})
-        for m in re.finditer(r"disabled=\{([^}]+)\}", src):
-            rules.append({"kind": "동작 차단", "condition": m.group(1).strip(),
-                          "effect": "버튼 비활성화", "source": fname})
+        for m in re.finditer(r"max=\{([\w.]+)\}[^>]*?min=\{(\w+)\}", src):
+            rules.append({"kind": "범위 제한", "condition": f"min {m.group(2)} / max {m.group(1)}",
+                          "effect": "입력값 범위 강제", "source": fname})
+        # disabled={...} 의 조건은 중첩 중괄호(화살표 블록/객체)까지 포함해 잡는다
+        for m in re.finditer(r"disabled=\{", src):
+            open_idx = src.index("{", m.start())
+            close_idx = _find_matching(src, open_idx, "{", "}")
+            if close_idx != -1:
+                cond = src[open_idx + 1:close_idx].strip()
+                rules.append({"kind": "동작 차단", "condition": cond,
+                              "effect": "버튼 비활성화", "source": fname})
         for m in re.finditer(r'if\s*\(!?(\w+)\)\s*\{\s*alert\("([^"]+)"\)', src):
             rules.append({"kind": "필수값", "condition": f"{m.group(1)} 조건 불충족",
                           "effect": f'알림 "{m.group(2)}" 후 중단', "source": fname})
-    return sorted(rules, key=lambda r: (r["kind"], r["condition"], r["source"]))
+    uniq = {(r["kind"], r["condition"], r["effect"], r["source"]): r for r in rules}
+    return sorted(uniq.values(), key=lambda r: (r["kind"], r["condition"], r["source"]))
 
 
 # ── 1-D. 화면 전환 ───────────────────────────────────────────
@@ -264,7 +363,7 @@ def extract_transitions(files: dict) -> list:
         for m in re.finditer(r'window\.location(?:\.href)?\s*=\s*["\']([^"\']+)["\']', src):
             trans.append({"target": m.group(1), "via": "window.location", "source": fname})
     uniq = {(t["target"], t["source"], t["via"]): t for t in trans}
-    return sorted(uniq.values(), key=lambda t: (t["source"], t["target"]))
+    return sorted(uniq.values(), key=lambda t: (t["source"], t["target"], t["via"]))
 
 
 # ── 1-E. 사용자 노출 문구 ────────────────────────────────────
@@ -290,11 +389,20 @@ def extract_messages(files: dict) -> list:
             add(m.group(1), "placeholder", "-", fname)
         for m in re.finditer(r'aria-label="([^"]+)"', src):
             add(m.group(1), "aria-label", "-", fname)
-        # JSX/HTML 텍스트 노드 (중괄호 없는 순수 텍스트)
-        for m in re.finditer(r">([^<>{}\n]+)<", src):
+        # JSX/HTML 텍스트 노드. 정확성 검증 발견: \n 을 제외해 자기 줄에 놓인
+        # 텍스트(Prettier 기본 포맷)를 놓쳤으므로 개행을 허용하고 strip 처리.
+        for m in re.finditer(r">([^<>{}]+)<", src):
             t = m.group(1).strip()
-            if t and not t.isascii() or (t and re.search(r"[A-Za-z]{2,}", t) and len(t) > 3):
+            if not t:
+                continue
+            if (not t.isascii()) or (re.search(r"[A-Za-z]{2,}", t) and len(t) > 3):
                 add(t, "UI 텍스트", "-", fname)
+        # JSX 조건부 렌더링 안의 문자열: {cond && "메시지"} / {cond ? "A" : "B"}
+        for m in re.finditer(r'\{[^{}]*?&&\s*[\'"]([^\'"]{2,})[\'"]', src):
+            add(m.group(1), "UI 텍스트(조건부)", "코드 분기", fname)
+        for m in re.finditer(r'\?\s*[\'"]([^\'"]{2,})[\'"]\s*:\s*[\'"]([^\'"]{2,})[\'"]', src):
+            add(m.group(1), "UI 텍스트(조건부)", "코드 분기", fname)
+            add(m.group(2), "UI 텍스트(조건부)", "코드 분기", fname)
     seen, out = set(), []
     for m in sorted(msgs, key=lambda x: (x["source"], x["kind"], x["text"])):
         key = (m["text"], m["kind"], m["source"])
@@ -307,14 +415,23 @@ def extract_messages(files: dict) -> list:
 # ── 1-F. 상태 관리 ───────────────────────────────────────────
 
 def extract_state(files: dict) -> list:
+    """전역 상태 훅 사용처를 수집한다. 정확성 검증 발견: 이전 정규식이 빈 괄호
+    `use[A-Z]\\w*\\(\\)` 만 매칭해 인자 있는 훅(useContext(Ctx), useSelector(fn),
+    파라미터 받는 커스텀 훅)을 전부 놓쳤다 — React/Redux에서 가장 흔한 상태
+    접근 패턴이다. 인자 유무와 무관하게, 구조분해/단일변수 할당 모두 잡는다."""
     usages = []
     for fname, src in files.items():
-        for m in re.finditer(r"const\s*\{([^}]+)\}\s*=\s*(use[A-Z]\w*)\(\)", src):
+        # 구조분해: const { a, b } = useX(...)
+        for m in re.finditer(r"const\s*\{([^}]+)\}\s*=\s*(use[A-Z]\w*)\s*\(", src):
             fields = ", ".join(sorted(f.strip() for f in m.group(1).split(",") if f.strip()))
             usages.append({"hook": m.group(2), "fields": fields, "source": fname})
+        # 단일 변수: const cart = useSelector(...) (useSelector/useContext 등)
+        for m in re.finditer(r"const\s+(\w+)\s*=\s*(use[A-Z]\w*)\s*\(", src):
+            usages.append({"hook": m.group(2), "fields": m.group(1), "source": fname})
         for m in re.finditer(r"createContext|createStore|defineStore|createSlice", src):
             usages.append({"hook": f"({m.group(0)} 정의)", "fields": "-", "source": fname})
-    return sorted(usages, key=lambda u: (u["hook"], u["source"]))
+    uniq = {(u["hook"], u["fields"], u["source"]): u for u in usages}
+    return sorted(uniq.values(), key=lambda u: (u["hook"], u["source"], u["fields"]))
 
 
 # ── 1-G. 외부 연동 & 트래킹 ──────────────────────────────────
@@ -332,20 +449,33 @@ def extract_integrations(files: dict) -> dict:
             pass
     tracking = []
     for fname, src in files.items():
-        for pattern, tool in TRACKING_PATTERNS:
+        # 정확성 검증 발견: amplitude.track(...) 이 벤더 전용 패턴과 마지막
+        # generic `track(` 패턴에 이중 매칭돼 같은 호출이 두 행(vendor + custom)으로
+        # 나왔다. 벤더 패턴을 먼저 적용해 매칭 구간을 기록하고, generic 패턴은
+        # 그 구간과 겹치면 건너뛰어 first-match-wins 로 만든다.
+        claimed = []  # (start, end) 벤더 매칭 구간
+        for pattern, tool in TRACKING_PATTERNS[:-1]:
             for m in re.finditer(pattern, src):
+                claimed.append((m.start(), m.end()))
                 tracking.append({"event": m.group(1), "tool": tool, "source": fname})
+        generic_pat, generic_tool = TRACKING_PATTERNS[-1]
+        for m in re.finditer(generic_pat, src):
+            if any(a <= m.start() < b for a, b in claimed):
+                continue
+            tracking.append({"event": m.group(1), "tool": generic_tool, "source": fname})
     tracking = sorted({(t["event"], t["tool"], t["source"]): t for t in tracking}.values(),
-                      key=lambda t: (t["tool"], t["event"]))
+                      key=lambda t: (t["tool"], t["event"], t["source"]))
     return {"third_party_deps": deps, "tracking": tracking}
 
 
 # ── 1-H. As-Is 스냅샷 ────────────────────────────────────────
 
 def extract_snapshot(root: pathlib.Path, files: dict) -> dict:
+    # 결정성 검증 발견: 축약 해시 %h 는 clone 방식/오브젝트 수/core.abbrev 에 따라
+    # 같은 커밋도 값이 달라진다. reference.md 스펙대로 전체 해시(%H)를 사용한다.
     commit, when = "git 정보 없음", "-"
     try:
-        out = subprocess.run(["git", "log", "-1", "--format=%h|%ci"], cwd=root,
+        out = subprocess.run(["git", "log", "-1", "--format=%H|%ci"], cwd=root,
                              capture_output=True, text=True, timeout=10)
         if out.returncode == 0 and "|" in out.stdout:
             commit, when = out.stdout.strip().split("|", 1)
@@ -370,18 +500,22 @@ def extract_secret_findings(root: pathlib.Path) -> list:
     except (OSError, subprocess.TimeoutExpired):
         pass
 
-    for p in sorted(root.rglob("*")):
-        if not p.is_file() or ".git" in p.parts:
+    # 심볼릭 링크는 건너뛴다(_walk_safe_files) — root 밖 파일 접근 차단.
+    for p in _walk_safe_files(root):
+        if ".git" in p.parts:
             continue
         rel = str(p.relative_to(root))
         if p.name in SECRET_FILENAMES or p.suffix in SECRET_SUFFIXES:
             findings.append({"path": rel, "pattern": f"파일명/확장자: {p.name or p.suffix}",
                              "tracked": rel in tracked})
             continue
-        if p.name == ".env":
-            findings.append({"path": rel, "pattern": ".env 파일", "tracked": rel in tracked})
+        # 보안 검증 발견: `.env` 완전일치만 봐서 .env.local/.env.production 등
+        # 프레임워크 공통 변형을 놓쳤다 — .env 로 시작하면 모두 잡는다.
+        if p.name == ".env" or p.name.startswith(".env."):
+            findings.append({"path": rel, "pattern": f"{p.name} 파일", "tracked": rel in tracked})
             continue
-        if p.suffix in (".ts", ".tsx", ".js", ".jsx", ".json", ".yml", ".yaml"):
+        # .vue 도 스캔 대상에 포함 (SRC_EXT엔 있으면서 시크릿 스캔에선 빠져있던 비일관 수정)
+        if p.suffix in (".ts", ".tsx", ".js", ".jsx", ".vue", ".json", ".yml", ".yaml"):
             try:
                 text = p.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
@@ -397,14 +531,21 @@ def extract_secret_findings(root: pathlib.Path) -> list:
 # ── 출력 ─────────────────────────────────────────────────────
 
 def _escape_cell(v: str) -> str:
-    """테이블 셀 안전화. 백틱(`...`)으로 감싼 값은 마크다운 코드 스팬이 되어
-    렌더러가 이미 파이프를 리터럴로 보존하므로 이스케이프하지 않는다 — 백틱
-    안에서 `\\|`를 이스케이프하면 CommonMark 코드 스팬 규칙상 백슬래시 이스케이프가
-    처리되지 않아 화면에 `\\`가 그대로 노출되는 버그가 있었다 (실전 검증 발견).
-    백틱 밖의 순수 텍스트에 파이프가 있으면 `\\|`로 이스케이프해 컬럼 분리를 막는다."""
+    """테이블 셀 안전화.
+
+    - 백틱(`...`)으로 감싼 값은 마크다운 코드 스팬이 되어 렌더러가 파이프를
+      리터럴로 보존하고 raw HTML도 자동 이스케이프하므로 그대로 둔다. (백틱
+      안에서 `\\|`를 이스케이프하면 CommonMark 규칙상 백슬래시가 그대로 노출됨.)
+    - 백틱 밖 순수 텍스트(메시지 카탈로그 문구·효과 설명 등)는:
+        1) 보안 검증 발견: python-markdown이 raw HTML을 통과시켜, 분석 대상
+           코드에서 추출한 문자열에 `<img src=x onerror=...>` 같은 태그가
+           있으면 생성 HTML에서 그대로 실행될 수 있었다(저장형 XSS). `<`,`>`,`&`
+           를 HTML 엔티티로 이스케이프해 차단한다.
+        2) 파이프(|)는 `\\|`로 이스케이프해 셀 컬럼 분리를 막는다."""
     s = str(v)
     if s.startswith("`") and s.endswith("`") and len(s) >= 2:
         return s
+    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return s.replace("|", "\\|")
 
 

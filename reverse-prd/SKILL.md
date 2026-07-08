@@ -5,7 +5,7 @@ description: >
   자동 생성한다. 사용자가 "역기획 PRD", "PRD 만들어줘", "코드로 요구사항 문서",
   "기획 문서 역으로 뽑아줘" 등을 요청할 때 자동 실행. 인자로 파일 경로 또는 디렉토리를 받는다.
   정책 규칙 위주의 정책서가 필요하면 reverse-spec 스킬을 사용한다.
-argument-hint: <파일_또는_디렉토리_경로> [--format pdf|docx] [--lang ko|en]
+argument-hint: <파일_또는_디렉토리_경로> [--format pdf|docx|html] [--lang ko|en]
 allowed-tools: >
   Read, Glob, Write,
   Bash(find *), Bash(ls *),

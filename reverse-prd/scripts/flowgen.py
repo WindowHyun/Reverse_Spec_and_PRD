@@ -68,8 +68,13 @@ def layout(nodes: list, edges: list, entries: list) -> dict:
                     changed = True
         if not changed:
             break
-    for i in ids:
-        depth.setdefault(i, 0)
+    # 렌더링 검증 발견: 어떤 진입점으로도 도달 불가능한 고립 노드(외부와 끊긴
+    # 사이클 등)를 depth 0으로 두면 실제 진입 화면과 같은 컬럼에 섞여, '섬'인데
+    # 진입점처럼 보였다. 도달 못한 노드는 별도의 뒤쪽 컬럼(detached)에 모은다.
+    reached_max = max(depth.values()) if depth else 0
+    unreached = [i for i in ids if i not in depth]
+    for offset, i in enumerate(unreached):
+        depth[i] = reached_max + 2 + offset  # 진입 흐름과 한 컬럼 이상 띄워 분리
 
     cols = {}
     for n in nodes:  # JSON 순서 유지 → 결정적
