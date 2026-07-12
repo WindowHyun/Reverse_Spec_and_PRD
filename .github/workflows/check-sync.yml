@@ -1,0 +1,16 @@
+name: check-sync
+# 두 스킬(reverse-spec / reverse-prd)의 공유 파일 사본이 어긋나면 실패한다.
+# 로컬에서는 커밋 전 `bash tools/check-sync.sh`로 동일 검증을 수행한다.
+on:
+  push:
+  pull_request:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 공유 파일 동기화 검증
+        run: bash tools/check-sync.sh
+      - name: 파이썬 문법 검증
+        run: python3 -m py_compile reverse-prd/scripts/*.py reverse-spec/scripts/*.py
