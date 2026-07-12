@@ -53,6 +53,9 @@ def layout(nodes: list, edges: list, entries: list) -> dict:
         out_edges.setdefault(e["from"], []).append(e["to"])
         if e["to"] in indeg:
             indeg[e["to"]] += 1
+    # 존재하지 않는 id가 entry로 들어오면(오타 등) 전 노드가 도달 불가 판정을
+    # 받아 레이아웃이 퇴화하므로, 실제 노드만 남기고 없으면 in-degree 0으로 폴백.
+    entries = [i for i in entries if i in indeg]
     if not entries:
         entries = [i for i in ids if indeg[i] == 0] or ids[:1]
 
@@ -70,11 +73,32 @@ def layout(nodes: list, edges: list, entries: list) -> dict:
             break
     # 렌더링 검증 발견: 어떤 진입점으로도 도달 불가능한 고립 노드(외부와 끊긴
     # 사이클 등)를 depth 0으로 두면 실제 진입 화면과 같은 컬럼에 섞여, '섬'인데
-    # 진입점처럼 보였다. 도달 못한 노드는 별도의 뒤쪽 컬럼(detached)에 모은다.
-    reached_max = max(depth.values()) if depth else 0
+    # 진입점처럼 보였다. 구조 재점검 추가 발견: 이전 구현은 도달 못한 노드를
+    # "노드당 한 컬럼씩" 가로로 펼쳐(offset을 depth에 더함), detached 노드가
+    # 많으면 한 줄짜리 초광폭 SVG가 됐다(동봉 mock-shop 스켈레톤만으로 2136px).
+    # 수정: detached 서브그래프도 in-degree 0 노드를 시드로 같은 완화를 돌려
+    # 자체 좌→우 흐름을 만들고, 시드가 없는 순수 사이클은 기준 컬럼에 모은다.
     unreached = [i for i in ids if i not in depth]
-    for offset, i in enumerate(unreached):
-        depth[i] = reached_max + 2 + offset  # 진입 흐름과 한 컬럼 이상 띄워 분리
+    if unreached:
+        base = max(depth.values()) + 2 if depth else 0  # 진입 흐름과 한 컬럼 띄움
+        unreached_set = set(unreached)
+        for i in unreached:
+            if indeg[i] == 0:
+                depth[i] = base
+        if not any(i in depth for i in unreached):
+            depth[unreached[0]] = base  # 순수 사이클뿐이면 첫 노드를 시드로
+        for _ in range(len(unreached)):
+            changed = False
+            for e in edges:
+                if e["from"] in depth and e["to"] in unreached_set:
+                    d = depth[e["from"]] + 1
+                    if d > depth.get(e["to"], -1) and d < base + len(ids):
+                        depth[e["to"]] = d
+                        changed = True
+            if not changed:
+                break
+        for i in unreached:
+            depth.setdefault(i, base)
 
     cols = {}
     for n in nodes:  # JSON 순서 유지 → 결정적
@@ -99,6 +123,15 @@ def esc(s: str) -> str:
 def build_svg(data: dict) -> str:
     nodes = data["nodes"]
     edges = data.get("edges", [])
+    # 중복 id는 같은 좌표에 겹쳐 그려지므로 첫 정의만 사용 (구조 재점검 발견)
+    seen_ids, deduped = set(), []
+    for n in nodes:
+        if n["id"] in seen_ids:
+            print(f"⚠️  중복 노드 id '{n['id']}' — 첫 정의만 사용", file=sys.stderr)
+            continue
+        seen_ids.add(n["id"])
+        deduped.append(n)
+    nodes = deduped
     if len(nodes) > MAX_NODES:
         print(f"⚠️  노드 {len(nodes)}개 중 {MAX_NODES}개만 표시 (과밀 방지) — "
               f"전체 목록은 사실 표(_facts.md)를 참조", file=sys.stderr)
@@ -185,6 +218,12 @@ def main() -> int:
     args = ap.parse_args()
 
     data = json.loads(pathlib.Path(args.input).read_text(encoding="utf-8"))
+    if not data.get("nodes"):
+        # 구조 재점검 발견: 빈 nodes로 layout()의 max()가 ValueError로 죽었다.
+        # extract.py는 라우트 0개여도 --emit-flow 시 빈 스켈레톤을 만들 수 있다.
+        print("❌ nodes가 비어 있습니다 — 라우트가 추출되지 않아 흐름도를 만들 수 "
+              "없습니다. flow.json에 노드를 채운 뒤 다시 실행하세요.", file=sys.stderr)
+        return 1
     svg = build_svg(data)
     if args.output:
         pathlib.Path(args.output).write_text(svg, encoding="utf-8")

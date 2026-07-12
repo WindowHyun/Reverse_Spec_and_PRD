@@ -22,6 +22,7 @@ allowed-tools 를 `Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)` 로 좁힐 수 �
 """
 import argparse
 import datetime
+import html as html_mod
 import pathlib
 import re
 import sys
@@ -38,15 +39,36 @@ def _pdf_url_fetcher(url: str, *args, **kwargs):
     return default_url_fetcher(url, *args, **kwargs)
 
 
+def _sub_strikethrough(md_text: str) -> str:
+    """~~text~~ → <del> 선치환을 코드 펜스 밖에서만 적용한다. 구조 재점검 발견:
+    전역 치환이 코드블록 안의 `~~`까지 바꿔, 근거 코드 인용에 리터럴
+    `<del>` 텍스트가 박히는 내용 훼손이 있었다."""
+    lines = md_text.split("\n")
+    in_fence = False
+    for i, ln in enumerate(lines):
+        if ln.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            lines[i] = re.sub(r"~~(.+?)~~", r"<del>\1</del>", ln)
+    return "\n".join(lines)
+
+
 def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
     import markdown
     # python-markdown 코어에 취소선(~~text~~)이 없어 <del>로 선치환 (HTML/PDF 공통)
-    md_text = re.sub(r"~~(.+?)~~", r"<del>\1</del>", md_text)
+    md_text = _sub_strikethrough(md_text)
     body = markdown.markdown(md_text, extensions=["tables", "toc", "fenced_code"])
+    # 제목은 삽입 문맥별로 이스케이프 — HTML 요소용과 CSS 문자열용이 다르다.
+    # (구조 재점검 발견: `"` 포함 제목이 @page content CSS를 깨뜨렸고,
+    #  <title> 요소 자체가 없어 브라우저 탭에 파일명이 노출됐다.)
+    title_html = html_mod.escape(title)
+    title_css = title.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
     return f"""<!DOCTYPE html>
 <html lang="{lang}">
 <head>
 <meta charset="UTF-8">
+<title>{title_html}</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&display=swap');
   body {{ font-family: 'Noto Sans KR', sans-serif; font-size: 11pt; line-height: 1.8;
@@ -72,7 +94,7 @@ def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
   @page {{
     size: A4;
     margin: 20mm 18mm 20mm 20mm;
-    @top-center {{ content: "{title}"; font-size: 9pt; color: #888; }}
+    @top-center {{ content: "{title_css}"; font-size: 9pt; color: #888; }}
     @bottom-right {{ content: counter(page) " / " counter(pages); font-size: 9pt; color: #888; }}
   }}
 </style>
@@ -220,6 +242,12 @@ def render_docx(md_text: str, out_path: pathlib.Path, title: str) -> None:
         line = lines[i]
         stripped = line.strip()
 
+        # 표 flush는 어떤 분기보다 먼저 수행한다 — 구조 재점검 발견: 코드펜스
+        # 분기가 먼저 continue해서, 표 바로 다음 줄이 ``` 이면 코드블록이 표보다
+        # 앞에 삽입되는 블록 순서 뒤바뀜이 있었다.
+        if not in_code and table_buf and not stripped.startswith("|"):
+            flush_table()
+
         # 코드 펜스
         if stripped.startswith("```"):
             if in_code:
@@ -235,13 +263,11 @@ def render_docx(md_text: str, out_path: pathlib.Path, title: str) -> None:
             i += 1
             continue
 
-        # 테이블 누적
+        # 테이블 누적 (flush는 루프 상단에서 일괄 처리)
         if stripped.startswith("|"):
             table_buf.append(line)
             i += 1
             continue
-        elif table_buf:
-            flush_table()
 
         if not stripped:
             i += 1
@@ -289,6 +315,9 @@ def render_docx(md_text: str, out_path: pathlib.Path, title: str) -> None:
 
     if table_buf:
         flush_table()
+    if code_buf:
+        # 닫히지 않은 코드 펜스 — 이전엔 EOF에서 flush 없이 내용이 통째로 유실됐다
+        doc.add_paragraph("\n".join(code_buf), style="Intense Quote")
 
     doc.save(str(out_path))
 
@@ -309,6 +338,11 @@ def main() -> int:
     invalid = [f for f in formats if f not in ("pdf", "docx", "html")]
     if invalid:
         print(f"❌ 지원하지 않는 형식: {', '.join(invalid)} (pdf|docx|html)", file=sys.stderr)
+        return 1
+    # accent는 CSS에 그대로 삽입되므로 hex 색상 형식만 허용 (스타일시트 주입 차단)
+    if not re.fullmatch(r"#[0-9a-fA-F]{3,8}", args.accent):
+        print(f"❌ --accent 는 hex 색상(#rgb/#rrggbb)이어야 합니다: {args.accent}",
+              file=sys.stderr)
         return 1
 
     md_text = pathlib.Path(args.input).read_text(encoding="utf-8")

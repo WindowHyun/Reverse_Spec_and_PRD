@@ -174,6 +174,8 @@
 - 코드 내 키 접두어 패턴: AKIA... (AWS), AIza... (Google), sk_live_/sk_test_
   (Stripe), ghp_/gho_ (GitHub), xox[baprs]- (Slack)
 - 스캔 대상 확장자: .ts/.tsx/.js/.jsx/.vue/.json/.yml/.yaml
+- node_modules / dist / build / .git 디렉토리는 제외 (소스 분석과 동일 기준 —
+  vendored 서드파티 코드가 프로젝트 시크릿으로 오탐되는 것을 막는다)
 - git 추적 대상이면 이미 커밋 이력에 남았다는 뜻이므로 위험도를 더 높게 표기
 - 심볼릭 링크는 따라가지 않는다(저장소 밖 파일 접근 차단)
 

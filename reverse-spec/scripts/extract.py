@@ -137,7 +137,9 @@ def read_sources(root: pathlib.Path) -> dict:
         if p.suffix in SRC_EXT or p.name == "package.json":
             try:
                 text = p.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
+            except (UnicodeDecodeError, OSError):
+                # 구조 재점검 발견: 권한 오류 등 OSError는 잡지 않아 파일 하나로
+                # 전체 추출이 죽었다 (시크릿 스캔 쪽은 이미 잡고 있던 비일관).
                 continue
             if p.name != "package.json":
                 text = _blank_full_line_comments(text)
@@ -191,9 +193,13 @@ def extract_routes(files: dict) -> list:
                            "guard": guard, "source": fname})
         # Vue Router: path와 component 사이에 meta:{...} 등 중첩 객체가 있어도
         # 매칭되도록, 그리고 lazy-load(() => import("..."))도 잡도록 개선.
+        # 구조 재점검 발견: 사이 구간이 라우트 객체 경계를 넘어갈 수 있어,
+        # component 없는 라우트(redirect 등)가 다음 라우트의 component와 오결합되고
+        # 그 다음 라우트는 표에서 사라졌다 — 사이 구간에 다음 `path:`가 나오면
+        # 매칭을 중단해 같은 라우트 객체 안에서만 짝을 짓는다.
         if "vue-router" in src or "createRouter" in src:
             for m in re.finditer(
-                    r"path:\s*['\"]([^'\"]+)['\"][\s\S]{0,300}?component:\s*"
+                    r"path:\s*['\"]([^'\"]+)['\"](?:(?!path\s*:)[\s\S]){0,300}?component:\s*"
                     r"(?:\(\)\s*=>\s*import\(\s*['\"]([^'\"]+)['\"]|(\w+))", src):
                 if m.group(3):
                     component = m.group(3)
@@ -392,6 +398,11 @@ def extract_messages(files: dict) -> list:
         # JSX/HTML 텍스트 노드. 정확성 검증 발견: \n 을 제외해 자기 줄에 놓인
         # 텍스트(Prettier 기본 포맷)를 놓쳤으므로 개행을 허용하고 strip 처리.
         for m in re.finditer(r">([^<>{}]+)<", src):
+            # 구조 재점검 발견: 화살표 함수 `=>` 뒤부터 다음 JSX `<` 사이의 코드가
+            # UI 텍스트로 오탐됐다(예: `=> navigate("/x"); ... return <div>`) —
+            # `>` 바로 앞이 `=`이면(=> 또는 >=) 텍스트 노드가 아니므로 건너뛴다.
+            if m.start() > 0 and src[m.start() - 1] == "=":
+                continue
             t = m.group(1).strip()
             if not t:
                 continue
@@ -502,7 +513,10 @@ def extract_secret_findings(root: pathlib.Path) -> list:
 
     # 심볼릭 링크는 건너뛴다(_walk_safe_files) — root 밖 파일 접근 차단.
     for p in _walk_safe_files(root):
-        if ".git" in p.parts:
+        # 구조 재점검 발견: read_sources와 달리 .git만 제외해 node_modules의
+        # vendored 코드가 프로젝트 시크릿으로 오탐되고, 실제 프로젝트에선
+        # 수만 파일을 스캔하는 성능 문제가 있었다 — 소스 분석과 동일 기준으로 제외.
+        if any(part in ("node_modules", ".git", "dist", "build") for part in p.parts):
             continue
         rel = str(p.relative_to(root))
         if p.name in SECRET_FILENAMES or p.suffix in SECRET_SUFFIXES:
@@ -543,6 +557,10 @@ def _escape_cell(v: str) -> str:
            를 HTML 엔티티로 이스케이프해 차단한다.
         2) 파이프(|)는 `\\|`로 이스케이프해 셀 컬럼 분리를 막는다."""
     s = str(v)
+    # 구조 재점검 발견: 여러 줄 조건식(Prettier 표준 포맷의 `if (\n !a ||\n !b\n)`,
+    # 여러 줄 disabled={...})이 셀에 개행 그대로 들어가 표 행이 여러 줄로 쪼개지며
+    # Markdown 표 구조 자체가 파손됐다 — 개행(및 주변 들여쓰기)을 공백 하나로 접는다.
+    s = re.sub(r"\s*\n\s*", " ", s)
     if s.startswith("`") and s.endswith("`") and len(s) >= 2:
         return s
     s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -637,14 +655,22 @@ def build_flow_skeleton(routes, trans, comps) -> dict:
     """flowgen.py 입력 스켈레톤. LLM이 라벨/점선(추정 표시)을 보강해 사용한다."""
     comp_route = {r["component"]: r["path"] for r in routes}
     file_comp = {c["source"]: c["name"] for c in comps if c["source"]}
-    nodes = []
+    # 구조 재점검 발견: 슬러그가 같아지는 경로(/a-b vs /a/b)가 같은 노드 id를 받아
+    # flowgen에서 두 노드가 같은 좌표에 겹쳐 그려졌다 — _2, _3 접미사로 구분하고,
+    # 같은 path가 여러 파일에 정의된 경우 노드는 1개만 만든다.
+    path_id, used, nodes = {}, set(), []
     for r in routes:
+        if r["path"] in path_id:
+            continue
+        base = re.sub(r"[^a-zA-Z0-9]+", "_", r["path"]).strip("_") or "root"
+        nid, n = base, 2
+        while nid in used:
+            nid, n = f"{base}_{n}", n + 1
+        used.add(nid)
+        path_id[r["path"]] = nid
         guard = ("admin" if r["guard"].startswith("role:")
                  else "login" if r["guard"] == "login" else "public")
-        nid = re.sub(r"[^a-zA-Z0-9]+", "_", r["path"]).strip("_") or "root"
         nodes.append({"id": nid, "label": f'{r["component"]} {r["path"]}', "guard": guard})
-    path_id = {r["path"]: re.sub(r"[^a-zA-Z0-9]+", "_", r["path"]).strip("_") or "root"
-               for r in routes}
     edges = []
     for t in trans:
         comp = next((c for f, c in file_comp.items() if t["source"].endswith(f)
@@ -659,8 +685,11 @@ def build_flow_skeleton(routes, trans, comps) -> dict:
         if k not in seen:
             seen.add(k)
             uniq_edges.append(e)
-    return {"nodes": nodes, "edges": uniq_edges,
-            "entry": [path_id.get("/", nodes[0]["id"] if nodes else "root")]}
+    # 노드가 하나도 없으면 entry도 비운다 (이전엔 존재하지 않는 "root"를 넣어
+    # flowgen이 빈 그래프에서 크래시하는 원인을 제공했다).
+    entry = ([path_id["/"]] if "/" in path_id
+             else [nodes[0]["id"]] if nodes else [])
+    return {"nodes": nodes, "edges": uniq_edges, "entry": entry}
 
 
 def main() -> int:
@@ -672,7 +701,13 @@ def main() -> int:
 
     root = pathlib.Path(args.target)
     if root.is_file():
-        files = {root.name: root.read_text(encoding="utf-8")}
+        # 구조 재점검 발견: 단일 파일 모드는 주석 블랭킹을 건너뛰어, 주석 처리된
+        # 죽은 코드(`// fetch("/api/dead")`)가 실제 API/전환으로 오탐됐다 —
+        # 디렉토리 모드(read_sources)와 동일하게 처리한다.
+        text = root.read_text(encoding="utf-8")
+        if root.name != "package.json":
+            text = _blank_full_line_comments(text)
+        files = {root.name: text}
         root = root.parent
     else:
         files = read_sources(root)
