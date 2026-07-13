@@ -18,6 +18,7 @@ reference.md의 1-A~1-H 추출 규칙을 파서(정규식)로 구현한다. LLM 
   flow.json  : (선택) flowgen.py 입력용 흐름도 스켈레톤 — LLM이 라벨/점선 보강 후 사용
 """
 import argparse
+import hashlib
 import json
 import pathlib
 import re
@@ -575,6 +576,20 @@ def md_table(headers: list, rows: list) -> str:
     return "\n".join(out)
 
 
+def _msg_id(m: dict, used: set) -> str:
+    """메시지 카탈로그 행 ID. 구조 재점검 발견: 순번 기반(MSG-01, 02…)은 문구가
+    하나만 추가/삭제돼도 전체가 재번호돼, As-Is 스냅샷(버전 간 비교)과 추적성
+    매트릭스(문서가 MSG ID를 참조)의 취지와 충돌했다 — (문구|유형|근거 파일)
+    해시 기반으로 바꿔 다른 문구가 바뀌어도 기존 행의 ID가 유지되게 한다.
+    해시 접두어가 충돌하면(희귀) 결정적으로 자릿수를 늘려 구분한다."""
+    h = hashlib.sha256(f'{m["text"]}|{m["kind"]}|{m["source"]}'.encode("utf-8")).hexdigest()
+    n = 6
+    while h[:n] in used and n < len(h):
+        n += 2
+    used.add(h[:n])
+    return f"MSG-{h[:n]}"
+
+
 def guard_label(g: str) -> str:
     if g == "public":
         return "공개"
@@ -585,6 +600,7 @@ def guard_label(g: str) -> str:
 
 def build_facts_md(root, routes, comps, apis, consts, rules, trans, msgs, state,
                    integ, snap, secrets) -> str:
+    _msg_ids_used = set()  # 해시 접두어 충돌 감지용 (1-E ID 생성)
     s = ["<!-- scripts/extract.py 출력 — 결정적 사실 계층. LLM은 이 표를 근거로만 해석한다. -->",
          ""]
     if secrets:
@@ -628,9 +644,9 @@ def build_facts_md(root, routes, comps, apis, consts, rules, trans, msgs, state,
          if trans else "(전환 호출 미발견)",
          "", "## 1-E. 사용자 노출 문구 (에러/메시지 카탈로그 원자료)", "",
          md_table(["ID", "문구", "유형", "노출 조건", "근거 파일"],
-                  [[f"MSG-{i+1:02d}", m["text"], m["kind"], f'`{m["cond"]}`'
+                  [[_msg_id(m, _msg_ids_used), m["text"], m["kind"], f'`{m["cond"]}`'
                     if m["cond"] != "-" else "-", f'`{m["source"]}`']
-                   for i, m in enumerate(msgs)]) if msgs else "(문구 미발견)",
+                   for m in msgs]) if msgs else "(문구 미발견)",
          "", "## 1-F. 상태 관리 사용처", "",
          md_table(["상태 단위", "사용 필드/액션", "사용 파일"],
                   [[f'`{u["hook"]}`', u["fields"], f'`{u["source"]}`'] for u in state])
