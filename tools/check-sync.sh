@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 두 스킬(reverse-spec / reverse-prd)이 공유하는 파일이 동일 사본인지 검증한다.
 # 스킬은 ${CLAUDE_SKILL_DIR}로 자기 디렉토리 내부만 참조할 수 있어 사본을 둘 수밖에 없다.
+# 정본은 reverse-prd 쪽 — 수정은 reverse-prd에서 하고 tools/sync.sh로 반영한다.
 # 커밋 전 또는 CI에서 실행: bash tools/check-sync.sh
 set -u
 
@@ -31,8 +32,9 @@ done
 
 if [[ $status -ne 0 ]]; then
   echo ""
-  echo "공유 파일이 어긋났습니다. 한쪽을 수정했다면 다른 쪽에도 복사하세요:"
-  echo "  cp reverse-prd/reference.md reverse-spec/reference.md"
-  echo "  cp reverse-prd/scripts/render.py reverse-spec/scripts/render.py"
+  echo "공유 파일이 어긋났습니다. 정본은 reverse-prd 쪽입니다 —"
+  echo "reverse-prd에서 수정한 뒤 단방향 동기화 스크립트를 실행하세요:"
+  echo "  bash tools/sync.sh"
+  echo "(reverse-spec 쪽을 직접 수정했다면, 그 변경을 먼저 reverse-prd로 옮길 것)"
 fi
 exit $status

@@ -37,8 +37,13 @@
 pip install weasyprint markdown python-docx
 ```
 
-HTML 출력은 `markdown`만, PDF는 `weasyprint`, DOCX는 `python-docx`가 필요하다.
-macOS에서 `python`/`pip`이 없으면 `python3`/`pip3`를 사용한다.
+**Python 3.9 이상이 필요하다** (렌더러가 최신 타입 표기를 사용하며, 현행 WeasyPrint도
+3.9+를 요구한다). HTML 출력은 `markdown`만, PDF는 `weasyprint`, DOCX는 `python-docx`가
+필요하다. macOS에서 `python`/`pip`이 없으면 `python3`/`pip3`를 사용한다.
+
+스킬은 산출물(`reverse-spec-output/`, `reverse-prd-output/` — `_facts.md`/`_flow.json`
+중간 파일 포함)을 **분석 대상 프로젝트의 작업 디렉토리에** 생성한다. 커밋을 원치
+않으면 해당 프로젝트의 `.gitignore`에 이 디렉토리들을 추가한다.
 
 **PDF 플랫폼 안내 (WeasyPrint는 네이티브 Pango 라이브러리가 필요 — pip만으로는 부족):**
 
@@ -215,7 +220,9 @@ PDF는 공유/인쇄용. `--format docx,html`을 지정하면 PDF 대신 Word로
 ├── docs/
 │   └── skill-mcp-review.md  # 공식 문서 기반 Skill/MCP 준수 리뷰
 ├── tools/
-│   └── check-sync.sh        # 공유 파일 사본 일치 검증 스크립트
+│   ├── sync.sh              # 단방향 반영: 정본 reverse-prd → reverse-spec
+│   └── check-sync.sh        # 공유 파일 사본 일치 검증 스크립트 (CI에서도 실행)
+├── tests/                   # 동봉 스크립트 회귀 테스트 (CI에서 실행)
 └── examples/
     ├── mock-shop/           # 데모용 목 e-커머스 앱 (React Router)
     ├── reverse-prd-output/  # mock-shop PRD 샘플 (PDF+HTML 쌍, 본문 md, flow JSON/SVG)
@@ -223,9 +230,11 @@ PDF는 공유/인쇄용. `--format docx,html`을 지정하면 PDF 대신 Word로
     └── hybrid-demo/         # 하이브리드 추출 개념 증명 (결정성 데모)
 ```
 
-> `reference.md`와 `scripts/render.py`는 두 스킬에서 **동일 사본**으로 유지된다(스킬은
-> `${CLAUDE_SKILL_DIR}`로 자기 디렉토리 내부 파일만 참조하므로). 한쪽 수정 시 다른 쪽에도
-> 복사하고, 커밋 전 `bash tools/check-sync.sh` 로 일치 여부를 검증한다.
+> `reference.md`와 `scripts/` 3종은 두 스킬에서 **동일 사본**으로 유지된다(스킬은
+> `${CLAUDE_SKILL_DIR}`로 자기 디렉토리 내부 파일만 참조하므로). **정본은 `reverse-prd`
+> 쪽이다** — 수정은 reverse-prd에서 하고 `bash tools/sync.sh`로 reverse-spec에 반영한다.
+> 일치 여부는 커밋 전 `bash tools/check-sync.sh` 및 CI(`.github/workflows/`)가 검증하고,
+> 회귀 테스트(`tests/`)도 CI에서 함께 돈다.
 
 ---
 

@@ -38,8 +38,13 @@ scripts run from any shell. The setup recipes below show how to register it in e
 pip install weasyprint markdown python-docx
 ```
 
-HTML output needs only `markdown`; PDF needs `weasyprint`; DOCX needs `python-docx`.
-On macOS, use `python3`/`pip3` if `python`/`pip` don't exist.
+**Python 3.9+ is required** (the renderer uses modern type annotations; current WeasyPrint
+also needs 3.9+). HTML output needs only `markdown`; PDF needs `weasyprint`; DOCX needs
+`python-docx`. On macOS, use `python3`/`pip3` if `python`/`pip` don't exist.
+
+The skills write their outputs (`reverse-spec-output/`, `reverse-prd-output/`, including
+`_facts.md` / `_flow.json` intermediates) into the analyzed project's working directory —
+add those directories to that project's `.gitignore` if you don't want them committed.
 
 **Platform note for PDF (WeasyPrint needs the native Pango library — pip alone is not enough):**
 
@@ -220,7 +225,9 @@ Static analysis is honest about its limits:
 ├── docs/
 │   └── skill-mcp-review.md  # official-docs-based Skill/MCP compliance review
 ├── tools/
-│   └── check-sync.sh        # verifies the shared-file copies are identical
+│   ├── sync.sh              # one-way propagation: canonical reverse-prd → reverse-spec
+│   └── check-sync.sh        # verifies the shared-file copies are identical (also in CI)
+├── tests/                   # regression tests for the bundled scripts (run in CI)
 └── examples/
     ├── mock-shop/           # demo mock e-commerce app (React Router)
     ├── reverse-prd-output/  # sample PRD from mock-shop (PDF+HTML pair, body md, flow JSON/SVG)
@@ -228,9 +235,11 @@ Static analysis is honest about its limits:
     └── hybrid-demo/         # hybrid-extraction proof of concept (determinism demo)
 ```
 
-> `reference.md` and `scripts/render.py` are kept as **identical copies** in both skills (a
-> skill can only reference files inside its own directory via `${CLAUDE_SKILL_DIR}`). Edit one,
-> copy to the other, then verify with `bash tools/check-sync.sh` before committing.
+> `reference.md` and the three `scripts/` are kept as **identical copies** in both skills (a
+> skill can only reference files inside its own directory via `${CLAUDE_SKILL_DIR}`).
+> **The canonical copy lives in `reverse-prd`** — edit there, then propagate with
+> `bash tools/sync.sh`. Consistency is verified by `bash tools/check-sync.sh` and by CI
+> (`.github/workflows/`), which also runs the regression tests in `tests/`.
 
 ---
 
