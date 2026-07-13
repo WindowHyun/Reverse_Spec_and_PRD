@@ -1,6 +1,6 @@
-name: check-sync
-# 두 스킬(reverse-spec / reverse-prd)의 공유 파일 사본이 어긋나면 실패한다.
-# 로컬에서는 커밋 전 `bash tools/check-sync.sh`로 동일 검증을 수행한다.
+name: ci
+# 1) 공유 파일 사본 동기화 검증 (정본: reverse-prd — tools/sync.sh로 반영)
+# 2) 회귀 테스트 (tests/ — 실제 감사에서 발견된 버그의 재현 케이스 고정)
 on:
   push:
   pull_request:
@@ -14,3 +14,15 @@ jobs:
         run: bash tools/check-sync.sh
       - name: 파이썬 문법 검증
         run: python3 -m py_compile reverse-prd/scripts/*.py reverse-spec/scripts/*.py
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"  # 지원 최소 버전으로 테스트 (render.py가 3.9+ 요구)
+      - name: 의존성 설치
+        run: pip install pytest markdown python-docx
+      - name: 회귀 테스트
+        run: python -m pytest tests/ -q
