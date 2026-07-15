@@ -59,6 +59,35 @@ def test_title_style_breakout_blocked():
     assert "</style><script>alert(1)</script>" not in head
 
 
+# ── 인접 표 분리: 빈 줄 없이 붙은 두 표가 병합/오염되면 안 된다 ──
+
+_TWO_TABLES = ("| A | B |\n|---|---|\n| 1 | 2 |\n"
+               "| C | D |\n|---|---|\n| 3 | 4 |\n")
+
+
+def test_adjacent_tables_split_in_html():
+    h = render.build_html(_TWO_TABLES, "t", "#123456")
+    assert h.count("<table>") == 2
+    assert "<td>---</td>" not in h  # 구분선이 데이터 행으로 새지 않음
+
+
+def test_adjacent_tables_split_in_docx(tmp_path):
+    out = tmp_path / "t.docx"
+    render.render_docx(_TWO_TABLES, out, "t")
+    from docx import Document
+    tables = Document(str(out)).tables
+    assert len(tables) == 2
+    for t in tables:
+        for row in t.rows:
+            assert [c.text for c in row.cells] != ["---", "---"]
+
+
+def test_single_table_not_split():
+    # 회귀 방지: 정상 단일 표는 그대로 하나여야 한다
+    h = render.build_html("| X | Y |\n|---|---|\n| 1 | 2 |\n", "t", "#123456")
+    assert h.count("<table>") == 1
+
+
 # ── DOCX: 표 직후 코드펜스가 와도 블록 순서가 유지돼야 한다 ──
 
 def test_docx_table_before_adjacent_code_fence(tmp_path):

@@ -251,6 +251,42 @@ def test_secret_scan_reports_all_kinds_in_one_file(tmp_path):
     assert "AWS access key" in md and "Stripe secret key" in md
 
 
+# ── 커버리지 한계 고정: 정규식 정적분석의 '본질적 한계'가 '저통계'로 드러나는지 ──
+#    (1-I가 문서화한 한계. 이 조건이 성립해야 "낮은 통계 → 수동 보완" 안전망이
+#     작동한다. 커버리지가 조용히 바뀌면 이 테스트가 알려 문서 갱신을 촉발한다.)
+
+def _stat(md, key):
+    import re as _re
+    m = _re.search(rf"{key} (\d+)", md.split("추출 통계:")[1])
+    return int(m.group(1))
+
+
+def test_nextjs_app_router_yields_zero_routes(tmp_path):
+    # Next.js app/ 파일 기반 라우팅은 라우트 정의문이 없어 파서가 0을 낸다 →
+    # '라우트 0인데 화면이 명백' = 1-I 안전망 트리거 조건. 이 저통계를 고정한다.
+    app = tmp_path / "app"
+    for seg in ("", "products", "cart"):
+        d = app / seg
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "page.tsx").write_text(
+            "export default function Page(){ return <main>화면</main>; }\n",
+            encoding="utf-8")
+    md, _ = run_cli(tmp_path, tmp_path)
+    assert _stat(md, "라우트") == 0          # 문서화된 커버리지 한계(회귀 감지용)
+    assert _stat(md, "컴포넌트") >= 1        # 컴포넌트는 잡히므로 완전 실명은 아님
+
+
+def test_vue_script_setup_component_not_counted(tmp_path):
+    # Vue <script setup> 단일파일 컴포넌트는 컴포넌트 표에 집계되지 않는다(1-I).
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "Checkout.vue").write_text(
+        "<script setup lang='ts'>\nconst x = 1\n</script>\n"
+        "<template><div>결제</div></template>\n", encoding="utf-8")
+    md, _ = run_cli(tmp_path, tmp_path)
+    assert _stat(md, "컴포넌트") == 0        # 문서화된 한계(회귀 감지용)
+
+
 # ── 읽기 오류 격리: 권한 없는 파일 하나로 전체가 죽으면 안 된다 ──
 
 import os

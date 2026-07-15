@@ -58,6 +58,7 @@ def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
     import markdown
     # python-markdown 코어에 취소선(~~text~~)이 없어 <del>로 선치환 (HTML/PDF 공통)
     md_text = _sub_strikethrough(md_text)
+    md_text = _separate_adjacent_tables(md_text)  # 붙은 표 분리 (HTML 흡수 방지)
     body = markdown.markdown(md_text, extensions=["tables", "toc", "fenced_code"])
     # 제목은 삽입 문맥별로 이스케이프 — HTML 요소용과 CSS 문자열용이 다르다.
     # (구조 재점검 발견: `"` 포함 제목이 @page content CSS를 깨뜨렸고,
@@ -190,6 +191,39 @@ def _split_table_row(line: str) -> list:
     return [c.strip() for c in cells]
 
 
+_SEP_CELL = re.compile(r"^:?-{1,}:?$")
+
+
+def _is_separator_row(line: str) -> bool:
+    """GFM 표 구분선(`|---|:--:|` 등) 여부. 각 셀이 대시(정렬 콜론 허용)뿐인지 본다."""
+    s = line.strip()
+    if not s.startswith("|"):
+        return False
+    cells = _split_table_row(s)
+    return bool(cells) and all(_SEP_CELL.match(c.strip()) for c in cells)
+
+
+def _separate_adjacent_tables(md_text: str) -> str:
+    """빈 줄 없이 이어 붙은 두 GFM 표 사이에 빈 줄을 삽입한다.
+
+    렌더링 재점검 발견: 표 두 개가 빈 줄 없이 붙으면 (a) HTML(markdown-core)은
+    둘째 표를 첫 표에 흡수해 `|---|`가 데이터 행으로 남고, (b) DOCX는 자체 파서가
+    한 표로 병합해 구분선이 `---` 데이터 행으로 새어 나왔다. 사실 표를 연달아
+    배치하는 PRD 본문에서 표가 뭉개진다. 새 표의 헤더(=다음 줄이 구분선인 행)가
+    앞 표의 행 바로 뒤에 올 때 그 사이에 빈 줄을 넣어 두 경로 모두에서 분리한다.
+    HTML/DOCX 렌더 앞단에 공통 적용."""
+    lines = md_text.split("\n")
+    out = []
+    for i, ln in enumerate(lines):
+        is_header = (i + 1 < len(lines) and _is_separator_row(lines[i + 1])
+                     and not _is_separator_row(ln))
+        if (is_header and ln.strip().startswith("|")
+                and out and out[-1].strip().startswith("|")):
+            out.append("")  # 이전 표 행과 새 표 헤더 사이 분리
+        out.append(ln)
+    return "\n".join(out)
+
+
 def _add_list_para(doc, text: str, base_style: str, nest: int):
     """중첩 레벨(nest)에 맞는 리스트 스타일을 적용하되, 해당 스타일이 문서
     템플릿에 없으면 기본 스타일로 안전 폴백한다 ('List Bullet 2' 등이 없는
@@ -219,7 +253,7 @@ def render_docx(md_text: str, out_path: pathlib.Path, title: str) -> None:
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     header_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    lines = md_text.splitlines()
+    lines = _separate_adjacent_tables(md_text).splitlines()  # 붙은 표 분리
     i = 0
     in_code = False
     code_buf: list[str] = []
