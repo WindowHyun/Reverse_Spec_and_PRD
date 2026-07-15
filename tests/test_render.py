@@ -52,6 +52,13 @@ def test_title_escaped_in_both_contexts():
     assert 'content: "t\\"quote"' in h
 
 
+def test_title_style_breakout_blocked():
+    # 제목의 </style> 가 스타일 블록을 조기 종료시켜 스크립트를 주입하면 안 된다
+    h = render.build_html("본문", "제목</style><script>alert(1)</script>", "#123456")
+    head = h[:h.find("</head>")]
+    assert "</style><script>alert(1)</script>" not in head
+
+
 # ── DOCX: 표 직후 코드펜스가 와도 블록 순서가 유지돼야 한다 ──
 
 def test_docx_table_before_adjacent_code_fence(tmp_path):

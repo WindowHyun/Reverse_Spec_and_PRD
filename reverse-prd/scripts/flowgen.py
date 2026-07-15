@@ -226,7 +226,10 @@ def main() -> int:
         return 1
     svg = build_svg(data)
     if args.output:
-        pathlib.Path(args.output).write_text(svg, encoding="utf-8")
+        # extract.py와 동일 이유로 출력 디렉토리를 생성한다(절차 첫 호출 크래시 방지).
+        out_path = pathlib.Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(svg, encoding="utf-8")
         print(f"✅ SVG 생성 완료: {args.output}", file=sys.stderr)
     else:
         print(svg)

@@ -20,6 +20,7 @@ reference.md의 1-A~1-H 추출 규칙을 파서(정규식)로 구현한다. LLM 
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -130,6 +131,9 @@ def _walk_safe_files(root: pathlib.Path):
         yield p
 
 
+_MAX_FILE_BYTES = 1_000_000  # 파일당 분석 상한 (아래 DoS 방어 주석 참조)
+
+
 def read_sources(root: pathlib.Path) -> dict:
     files = {}
     for p in _walk_safe_files(root):
@@ -137,6 +141,15 @@ def read_sources(root: pathlib.Path) -> dict:
             continue
         if p.suffix in SRC_EXT or p.name == "package.json":
             try:
+                # 보안 재점검 발견(DoS 총량 상한): 괄호 매칭 스캔 상한(_MAX_MATCH_SCAN)이
+                # 파일당 비용을 O(n)으로 묶지만, 매치 수 자체가 파일 크기에 비례하므로
+                # 다중 MB의 악의적 단일 파일은 여전히 느려질 수 있다. 손으로 쓴 소스가
+                # 1MB를 넘는 일은 사실상 없으므로(대개 생성물/번들) 초과 파일은 건너뛰고
+                # 경고한다 — read_sources는 node_modules/dist/build를 이미 제외한다.
+                if p.stat().st_size > _MAX_FILE_BYTES:
+                    print(f"⚠️  {p.relative_to(root)} 가 {_MAX_FILE_BYTES//1000}KB를 초과해 "
+                          f"분석에서 제외됨(생성물/번들 추정).", file=sys.stderr)
+                    continue
                 text = p.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
                 # 구조 재점검 발견: 권한 오류 등 OSError는 잡지 않아 파일 하나로
@@ -248,10 +261,21 @@ def extract_components(files: dict) -> list:
 
 # ── 1-C. API / 상수 / 검증·차단 규칙 ─────────────────────────
 
+_MAX_MATCH_SCAN = 4000  # 대응 괄호 탐색 상한 (아래 DoS 방어 주석 참조)
+
+
 def _find_matching(src: str, open_idx: int, open_ch: str, close_ch: str) -> int:
-    """open_idx의 여는 괄호에 대응하는 닫는 괄호 인덱스를 중첩까지 셈해 찾는다."""
+    """open_idx의 여는 괄호에 대응하는 닫는 괄호 인덱스를 중첩까지 셈해 찾는다.
+
+    보안 재점검 발견(O(n²) DoS): 미종결 괄호가 반복되는 입력에서는 매 정규식
+    매치마다 이 함수가 파일 끝까지 스캔해, 입력 크기의 제곱에 비례하는 시간이
+    걸렸다(80KB fetch 미종결 → 20초, 수백 KB → 수 분 정지). 신뢰할 수 없는
+    코드를 분석하는 스킬 특성상 이는 서비스 거부 벡터다. 실제 코드에서 하나의
+    fetch()/if()/disabled={} 표현이 _MAX_MATCH_SCAN 자를 넘는 경우는 없으므로,
+    스캔 폭을 상한으로 묶어 전체를 O(n)으로 되돌린다(초과 시 미종결로 간주)."""
     depth = 0
-    for i in range(open_idx, len(src)):
+    end = min(len(src), open_idx + _MAX_MATCH_SCAN)
+    for i in range(open_idx, end):
         if src[i] == open_ch:
             depth += 1
         elif src[i] == close_ch:
@@ -480,6 +504,32 @@ def extract_integrations(files: dict) -> dict:
     return {"third_party_deps": deps, "tracking": tracking}
 
 
+# ── git 안전 호출 (신뢰 불가 저장소에서의 RCE 차단) ──────────
+
+def _safe_git(args: list, root: pathlib.Path, timeout: int = 10):
+    """분석 대상(신뢰 불가) 디렉토리에서 git을 실행할 때 임의 명령 실행을 차단한다.
+
+    보안 재점검 발견(치명적 RCE): 분석 대상이 자체 `.git`을 포함하면, git이 그
+    저장소의 `.git/config`를 읽어 `core.fsmonitor`/`core.pager`/hooks 등에 지정된
+    **임의 명령을 감사자 머신에서 실행**했다(`git ls-files`가 fsmonitor를 트리거,
+    실측 재현). 남이 준 코드를 '분석만' 해도 코드 실행으로 이어지는, 이 스킬의
+    핵심 용도에서 최악의 벡터다. 방어:
+      - `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`=/dev/null 로 전역/시스템 config 무시
+      - `-c` 로 명령 실행 경로(fsmonitor/hooksPath/pager/외부 alias 우회)를 무력화
+      - `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`
+    대상 저장소의 로컬 `.git/config`는 여전히 읽히지만, 명령을 실행시키는 키를
+    커맨드라인 `-c`가 덮어써 무력화한다(`-c`가 config 파일보다 우선)."""
+    env = dict(os.environ,
+               GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull,
+               GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
+    hardened = ["git",
+                "-c", "core.fsmonitor=", "-c", "core.hooksPath=" + os.devnull,
+                "-c", "core.pager=cat", "-c", "core.editor=true",
+                "-c", "protocol.ext.allow=never"] + args
+    return subprocess.run(hardened, cwd=root, capture_output=True, text=True,
+                          timeout=timeout, env=env)
+
+
 # ── 1-H. As-Is 스냅샷 ────────────────────────────────────────
 
 def extract_snapshot(root: pathlib.Path, files: dict) -> dict:
@@ -487,8 +537,7 @@ def extract_snapshot(root: pathlib.Path, files: dict) -> dict:
     # 같은 커밋도 값이 달라진다. reference.md 스펙대로 전체 해시(%H)를 사용한다.
     commit, when = "git 정보 없음", "-"
     try:
-        out = subprocess.run(["git", "log", "-1", "--format=%H|%ci"], cwd=root,
-                             capture_output=True, text=True, timeout=10)
+        out = _safe_git(["log", "-1", "--format=%H|%ci"], root)
         if out.returncode == 0 and "|" in out.stdout:
             commit, when = out.stdout.strip().split("|", 1)
     except (OSError, subprocess.TimeoutExpired):
@@ -505,8 +554,7 @@ def extract_secret_findings(root: pathlib.Path) -> list:
     findings = []
     tracked = set()
     try:
-        out = subprocess.run(["git", "ls-files"], cwd=root, capture_output=True,
-                             text=True, timeout=10)
+        out = _safe_git(["ls-files"], root)
         if out.returncode == 0:
             tracked = set(out.stdout.splitlines())
     except (OSError, subprocess.TimeoutExpired):
@@ -535,10 +583,12 @@ def extract_secret_findings(root: pathlib.Path) -> list:
                 text = p.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
                 continue
+            # 보안 재점검 발견: break로 파일당 첫 패턴만 보고해, 한 파일에 AWS+
+            # Stripe+GitHub 등 여러 종이 섞이면 나머지를 놓쳤다 — 전부 수집한다
+            # (값은 여전히 미출력, (path,pattern) 키로 중복 제거).
             for pattern, label in SECRET_KEY_PATTERNS:
                 if re.search(pattern, text):
                     findings.append({"path": rel, "pattern": label, "tracked": rel in tracked})
-                    break
     uniq = {(f["path"], f["pattern"]): f for f in findings}
     return sorted(uniq.values(), key=lambda f: f["path"])
 
@@ -556,13 +606,20 @@ def _escape_cell(v: str) -> str:
            코드에서 추출한 문자열에 `<img src=x onerror=...>` 같은 태그가
            있으면 생성 HTML에서 그대로 실행될 수 있었다(저장형 XSS). `<`,`>`,`&`
            를 HTML 엔티티로 이스케이프해 차단한다.
-        2) 파이프(|)는 `\\|`로 이스케이프해 셀 컬럼 분리를 막는다."""
+        2) 파이프(|)는 `\\|`로 이스케이프해 셀 컬럼 분리를 막는다.
+
+    보안 재점검 발견(저장형 XSS): build_facts_md가 파일 경로·전환 target 등을
+    백틱으로 감싸 넘기는데, 그 **값 내부에 백틱이 들어 있으면** 코드 스팬이 조기
+    종료되고 뒤따르는 `<img onerror=...>` 가 raw HTML로 방출돼 실행됐다
+    (분석 대상 코드의 `navigate("/x`<img ...>")` 로 실측 재현). 따라서 백틱
+    래핑을 신뢰하는 것은 **내부에 백틱이 없을 때만** 안전하다 — 내부 백틱이
+    있으면 코드 스팬으로 두지 않고 평문 경로로 떨어뜨려 HTML 이스케이프한다."""
     s = str(v)
     # 구조 재점검 발견: 여러 줄 조건식(Prettier 표준 포맷의 `if (\n !a ||\n !b\n)`,
     # 여러 줄 disabled={...})이 셀에 개행 그대로 들어가 표 행이 여러 줄로 쪼개지며
     # Markdown 표 구조 자체가 파손됐다 — 개행(및 주변 들여쓰기)을 공백 하나로 접는다.
     s = re.sub(r"\s*\n\s*", " ", s)
-    if s.startswith("`") and s.endswith("`") and len(s) >= 2:
+    if s.startswith("`") and s.endswith("`") and len(s) >= 2 and "`" not in s[1:-1]:
         return s
     s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     return s.replace("|", "\\|")
@@ -599,10 +656,20 @@ def guard_label(g: str) -> str:
 
 
 def build_facts_md(root, routes, comps, apis, consts, rules, trans, msgs, state,
-                   integ, snap, secrets) -> str:
+                   integ, snap, secrets, block_comment_warn=False) -> str:
     _msg_ids_used = set()  # 해시 접두어 충돌 감지용 (1-E ID 생성)
     s = ["<!-- scripts/extract.py 출력 — 결정적 사실 계층. LLM은 이 표를 근거로만 해석한다. -->",
          ""]
+    if block_comment_warn:
+        # 보안/정확성 재점검 발견: 파서는 한 줄 주석(//)만 제거하고 블록 주석
+        # (/* */, {/* */})은 다루지 않아, 그 안의 죽은 코드가 API/라우트/문구로
+        # 오탐된다. 그런데 1-I의 안전망("통계가 낮으면 수동 확인")은 오탐이
+        # 통계를 '높이므로' 트리거되지 않는다 — 이 사각지대를 상시 경고로 메운다.
+        s += ["## ⚠️ 파서 경고 — 블록 주석 존재 (오탐 가능)", "",
+              "> 분석 대상에 블록 주석(`/* */`, `{/* */}`)이 있다. 파서는 이를 "
+              "제거하지 못하므로, **주석 처리된 죽은 코드(API·라우트·상수·문구)가 "
+              "아래 사실 표에 실제처럼 섞였을 수 있다.** 특히 API·전환·상수 행은 "
+              "근거 파일의 블록 주석 내부인지 LLM이 Read로 교차검증할 것.", ""]
     if secrets:
         s += ["## ⚠️ 1-J. 하드코딩 시크릿 노출 스캔 — 발견됨 (값은 미출력)", "",
               md_table(["파일 경로", "발견 패턴", "git 추적됨"],
@@ -743,17 +810,27 @@ def main() -> int:
     snap = extract_snapshot(root, files)
     secrets = extract_secret_findings(root)
 
+    # 블록 주석(/* */, {/* */})이 소스에 있으면 오탐 경고를 켠다(파서가 미제거).
+    block_comment_warn = any("/*" in src for src in files.values())
     md = build_facts_md(root, routes, comps, apis, consts, rules, trans, msgs,
-                        state, integ, snap, secrets)
+                        state, integ, snap, secrets, block_comment_warn)
     if args.output:
-        pathlib.Path(args.output).write_text(md, encoding="utf-8")
+        # 구조 재점검 발견: SKILL.md는 reverse-prd-output/_facts.md 로 쓰라고
+        # 지시하는데 그 디렉토리를 만들지 않아, 새 프로젝트에서 절차의 첫 스크립트
+        # 호출이 FileNotFoundError 로 죽었다(render.py는 이미 mkdir 함) — 부모
+        # 디렉토리를 생성한다.
+        out_path = pathlib.Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(md, encoding="utf-8")
         print(f"✅ 사실 표 생성 완료: {args.output}", file=sys.stderr)
     else:
         print(md)
 
     if args.emit_flow:
         flow = build_flow_skeleton(routes, trans, comps)
-        pathlib.Path(args.emit_flow).write_text(
+        flow_path = pathlib.Path(args.emit_flow)
+        flow_path.parent.mkdir(parents=True, exist_ok=True)
+        flow_path.write_text(
             json.dumps(flow, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"✅ 흐름 스켈레톤 생성 완료: {args.emit_flow}", file=sys.stderr)
 

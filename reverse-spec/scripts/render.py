@@ -63,7 +63,13 @@ def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
     # (구조 재점검 발견: `"` 포함 제목이 @page content CSS를 깨뜨렸고,
     #  <title> 요소 자체가 없어 브라우저 탭에 파일명이 노출됐다.)
     title_html = html_mod.escape(title)
-    title_css = title.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+    # CSS 문자열 이스케이프 + `</style>` 조기 종료 차단. 보안 재점검 발견:
+    # 이전엔 \\ " 개행만 이스케이프해, 제목에 `</style><script>` 가 있으면
+    # 스타일 블록을 조기 종료시켜 스크립트를 주입할 수 있었다(--title은 보통
+    # 운영자 입력이라 위협모델 밖이지만 방어심화로 차단). `<` 뒤 `/` 를 끊어
+    # 어떤 태그도 조기 종료로 인식되지 않게 한다.
+    title_css = (title.replace("\\", "\\\\").replace('"', '\\"')
+                 .replace("\n", " ").replace("</", "<\\/"))
     return f"""<!DOCTYPE html>
 <html lang="{lang}">
 <head>

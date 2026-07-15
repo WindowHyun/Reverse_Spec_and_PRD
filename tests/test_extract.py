@@ -164,6 +164,93 @@ def test_escape_cell():
     assert extract._escape_cell("`a | b`") == "`a | b`"  # 코드 스팬은 보존
 
 
+# ── 보안: _escape_cell 백틱 브레이크아웃 XSS (내부 백틱 → 평문 이스케이프) ──
+
+def test_escape_cell_internal_backtick_not_trusted():
+    # 값 내부에 백틱이 있으면 코드스팬이 조기 종료돼 뒤 태그가 raw 방출됐다
+    out = extract._escape_cell("`/ok`<img src=x onerror=alert(1)>`")
+    assert "<img" not in out and "&lt;img" in out
+
+
+def test_stored_xss_via_transition_target_neutralized(tmp_path):
+    # navigate target에 백틱+태그를 심어도 생성 facts.md 표에 raw 태그가 없어야
+    f = tmp_path / "E.tsx"
+    f.write_text('export default function E(){ const g=()=>'
+                 'navigate("/ok`<img src=x onerror=alert(1)>"); return <div/>; }',
+                 encoding="utf-8")
+    md, _ = run_cli(f, tmp_path)
+    assert "<img src=x onerror=alert(1)>" not in md
+
+
+# ── 보안: git RCE — 악성 .git/config core.fsmonitor 미실행 ──
+
+def test_git_rce_blocked(tmp_path):
+    target = tmp_path / "repo"
+    target.mkdir()
+    proof = tmp_path / "pwned.txt"
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    subprocess.run(["git", "config", "core.fsmonitor",
+                    f'bash -c "echo x > {proof}"'], cwd=target, check=True)
+    (target / "a.ts").write_text("export const X = 1;\n", encoding="utf-8")
+    extract.extract_secret_findings(target)
+    extract.extract_snapshot(target, {})
+    assert not proof.exists(), "git이 악성 core.fsmonitor 명령을 실행했다(RCE)"
+
+
+def test_git_snapshot_still_reads_commit_on_clean_repo(tmp_path):
+    # RCE 하드닝이 정상 저장소의 커밋 해시 추출을 깨지 않아야(회귀 방지)
+    target = tmp_path / "repo"
+    target.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    (target / "a.ts").write_text("export const X = 1;\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=target, check=True)
+    subprocess.run(["git", "-c", "user.email=x@x", "-c", "user.name=x",
+                    "commit", "-qm", "init"], cwd=target, check=True)
+    snap = extract.extract_snapshot(target, {})
+    assert len(snap["commit"]) == 40 and snap["commit"] != "git 정보 없음"
+
+
+# ── 보안: O(n²) DoS — 미종결 괄호 대량 입력이 상한 시간 내에 끝나야 ──
+
+def test_unterminated_paren_dos_bounded():
+    import time
+    src = 'fetch("y`' * (120_000 // 9)  # ~120KB 미종결 fetch
+    t = time.time()
+    extract.extract_api_calls({"a.tsx": src})
+    dt = time.time() - t
+    assert dt < 6, f"괄호 매칭이 상한 없이 폭발(O(n²)) — {dt:.1f}s"
+
+
+def test_oversized_file_skipped(tmp_path):
+    big = tmp_path / "huge.ts"
+    big.write_text("x" * (extract._MAX_FILE_BYTES + 10), encoding="utf-8")
+    small = tmp_path / "ok.ts"
+    small.write_text("export const X = 1;\n", encoding="utf-8")
+    files = extract.read_sources(tmp_path)
+    assert "ok.ts" in files and "huge.ts" not in files
+
+
+# ── 정확성: 블록 주석 존재 시 오탐 경고 배너 ──
+
+def test_block_comment_warning_banner(tmp_path):
+    f = tmp_path / "Dead.tsx"
+    f.write_text('export default function D(){\n'
+                 '  /* fetch("/api/dead"); */\n  return <div/>;\n}\n',
+                 encoding="utf-8")
+    md, _ = run_cli(f, tmp_path)
+    assert "파서 경고 — 블록 주석 존재" in md
+
+
+# ── 보안: 시크릿 스캔이 한 파일의 여러 종류 시크릿을 모두 보고 ──
+
+def test_secret_scan_reports_all_kinds_in_one_file(tmp_path):
+    (tmp_path / "cfg.ts").write_text(
+        'const a="AKIAABCDEFGHIJKLMNOP";\n'
+        'const b="sk_live_abcdefghijklmnop0123";\n', encoding="utf-8")
+    md, _ = run_cli(tmp_path, tmp_path)
+    assert "AWS access key" in md and "Stripe secret key" in md
+
+
 # ── 읽기 오류 격리: 권한 없는 파일 하나로 전체가 죽으면 안 된다 ──
 
 import os
