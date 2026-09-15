@@ -634,6 +634,23 @@ def extract_components(files: dict) -> list:
 
 
 _FETCH_START = re.compile(r'fetch\(\s*[\'"`]([^\'"`]+)[\'"`]')
+_HANDLER_ATTR_RE = re.compile(r"^(on[a-zA-Z]\w*|@[\w:.$-]+|v-on:[\w:.$-]+)$")
+
+
+def _looks_like_executable_attr(src: str, quote_idx: int) -> bool:
+    """`quote_idx`의 따옴표가 Vue/HTML 실행 가능한 핸들러/디렉티브 속성값
+    (`onclick="..."`, `@click="..."`, `v-on:click="..."`)의 시작이면 True.
+    이런 속성값은 문자열이 아니라 그대로 실행되는 코드라, `_iter_fetch_calls`가
+    보통의 인자 문자열처럼 통째로 건너뛰면 그 안의 `fetch(...)`를 놓친다.
+    직전이 `=`이고, 그 앞의 속성 이름이 `on행동`/`@행동`/`v-on:행동` 패턴과
+    일치하는지만 본다(공백 없이 바로 `=`+따옴표가 오는 실제 속성 구문 기준)."""
+    if quote_idx == 0 or src[quote_idx - 1] != "=":
+        return False
+    j = quote_idx - 2
+    while j >= 0 and (src[j].isalnum() or src[j] in "_@:.$-"):
+        j -= 1
+    name = src[j + 1:quote_idx - 1]
+    return bool(_HANDLER_ATTR_RE.match(name))
 
 
 def _iter_fetch_calls(src: str):
@@ -679,10 +696,20 @@ def _iter_fetch_calls(src: str):
     # 놓쳤다 — 라우트 스캐너의 태그 감지/모드 전환 로직을 포팅해 `mode`에
     # "text"를 추가했다. 태그 자신의 종료 `>`를 찾는 목표 깊이는 이미 있던
     # `brace_modes` 스택 길이를 재사용한다.
+    #
+    # 정확성 검증 발견(PR 리뷰): `<button @click="fetch('/api')">`/
+    # `<button onclick="fetch('/api')">`처럼 Vue 디렉티브·HTML 인라인
+    # 핸들러 속성값은 문자열이 아니라 그대로 실행되는 코드인데, 이 스캐너는
+    # 모든 속성값 따옴표를 그냥 불투명한 문자열로 건너뛰어 그 안의 fetch
+    # 호출을 놓쳤다 — `_looks_like_executable_attr`로 핸들러 속성인지 판정한
+    # 뒤, 그런 속성값은 건너뛰지 않고 code 맥락 그대로 두어(따옴표만
+    # `attr_quote_stack`으로 기억) 안의 `fetch(...)`가 정상적으로 괄호
+    # 깊이 추적에 걸리게 한다.
     stack: list = []         # [(그 호출의 '('을 지날 때의 깊이, endpoint, '(' 위치), ...]
     brace_modes: list = []   # `{`를 열 때 mode를 저장, 대응 `}`에서 복원 (템플릿 보간/JSX 표현식 공용)
     text_stack: list = []    # 여는 태그가 "text"로 들어갈 때 복귀용 mode 저장
     pending_tags: list = []  # [(태그 시작 시점의 brace_modes 깊이, 닫는태그 여부, 시작 전 mode), ...]
+    attr_quote_stack: list = []  # 실행 가능한 핸들러 속성값을 여는 따옴표 문자 기억(닫힘 판정용)
     mode = "code"            # "code" | "template" | "text"
     depth, i, n = 0, 0, len(src)
     while i < n:
@@ -716,6 +743,14 @@ def _iter_fetch_calls(src: str):
             continue
 
         if mode == "code" and ch in ("'", '"'):
+            if attr_quote_stack and ch == attr_quote_stack[-1]:
+                attr_quote_stack.pop()
+                i += 1
+                continue
+            if not attr_quote_stack and _looks_like_executable_attr(src, i):
+                attr_quote_stack.append(ch)
+                i += 1
+                continue
             q = ch
             j = i + 1
             while j < n and src[j] != q:
@@ -966,22 +1001,37 @@ def _find_if_return_pairs(src: str) -> list:
             continue
         # 여는/닫는 태그 시작. "text" 맥락에서는 `<`+식별자/`/`가 무조건 태그이고,
         # "code" 맥락에서는 비교연산자/TSX 제네릭이 아닐 때만 태그로 본다.
+        # 태그 이름도 같이 기록해둔다 — `<script>`는 자식이 JSX 텍스트가 아니라
+        # 그대로 JS 코드이므로, 여는 태그 처리에서 "text"로 전환하지 않기 위함
+        # (아래 참고).
         if (ch == "<" and i + 1 < n and (src[i + 1].isalpha() or src[i + 1] == "/")
                 and not (mode == "code" and (_looks_like_operator_lt(src, i)
                                               or _looks_like_generic_params(src, i)))):
             is_closing = src[i + 1] == "/"
-            pending_tags.append((len(brace_modes), is_closing, mode))
+            name_start = i + (2 if is_closing else 1)
+            k = name_start
+            while k < n and (src[k].isalnum() or src[k] in "_$.-:"):
+                k += 1
+            tag_name = src[name_start:k]
+            pending_tags.append((len(brace_modes), is_closing, mode, tag_name))
             mode = "code"
             i += 2 if is_closing else 1
             continue
         if (mode == "code" and ch == ">" and pending_tags
                 and pending_tags[-1][0] == len(brace_modes)):
-            _, is_closing, mode_before = pending_tags.pop()
+            _, is_closing, mode_before, tag_name = pending_tags.pop()
             self_closing = i > 0 and src[i - 1] == "/"
+            # 정확성 검증 발견(PR 리뷰): Vue SFC의 `<script>`/`<script setup>`
+            # 자식은 JSX 텍스트가 아니라 그대로 JS 코드다 — fetch 스캐너의
+            # §13.19와 같은 이유로 `<script>`(대소문자 무관)만 "text"가 아니라
+            # "code"를 유지한다.
             if is_closing:
                 mode = text_stack.pop() if text_stack else "code"
             elif self_closing:
                 mode = mode_before
+            elif tag_name.lower() == "script":
+                text_stack.append(mode_before)
+                mode = "code"
             else:
                 text_stack.append(mode_before)
                 mode = "text"
@@ -1090,22 +1140,33 @@ def _iter_disabled_conditions(src: str):
             continue
         # 여는/닫는 태그 시작. "text" 맥락에서는 `<`+식별자/`/`가 무조건 태그이고,
         # "code" 맥락에서는 비교연산자/TSX 제네릭이 아닐 때만 태그로 본다.
+        # 태그 이름도 같이 기록해둔다 — `<script>`는 자식이 JSX 텍스트가 아니라
+        # 그대로 JS 코드이므로, 여는 태그 처리에서 "text"로 전환하지 않기 위함
+        # (fetch/if-return 스캐너의 §13.19/§13.20과 같은 이유, 아래 참고).
         if (ch == "<" and i + 1 < n and (src[i + 1].isalpha() or src[i + 1] == "/")
                 and not (mode == "code" and (_looks_like_operator_lt(src, i)
                                               or _looks_like_generic_params(src, i)))):
             is_closing = src[i + 1] == "/"
-            pending_tags.append((depth, is_closing, mode))
+            name_start = i + (2 if is_closing else 1)
+            k = name_start
+            while k < n and (src[k].isalnum() or src[k] in "_$.-:"):
+                k += 1
+            tag_name = src[name_start:k]
+            pending_tags.append((depth, is_closing, mode, tag_name))
             mode = "code"
             i += 2 if is_closing else 1
             continue
         if (mode == "code" and ch == ">" and pending_tags
                 and pending_tags[-1][0] == depth):
-            _, is_closing, mode_before = pending_tags.pop()
+            _, is_closing, mode_before, tag_name = pending_tags.pop()
             self_closing = i > 0 and src[i - 1] == "/"
             if is_closing:
                 mode = text_stack.pop() if text_stack else "code"
             elif self_closing:
                 mode = mode_before
+            elif tag_name.lower() == "script":
+                text_stack.append(mode_before)
+                mode = "code"
             else:
                 text_stack.append(mode_before)
                 mode = "text"
