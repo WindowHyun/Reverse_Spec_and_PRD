@@ -70,7 +70,15 @@ def _pdf_url_fetcher(url: str, *args, **kwargs):
 # 신규 의존성 없음, 단일 패스로 선형 동작, 인용부호·엔티티를 스펙대로 처리)로
 # 교체했다. 위험 태그(및 그 내용)는 통째로 버리고, 남는 태그는 이벤트 속성 제거·
 # URL 스킴 정규화 후 재직렬화한다.
-_DANGEROUS_TAG_NAMES = {"script", "iframe", "object", "embed", "style", "link"}
+# 보안 검증 발견(PR 리뷰, 5차): SVG 애니메이션 요소(`<animate>`, `<set>` 등)는
+# `attributeName="href"` + `values="javascript:..."` 조합으로 href 같은 속성값을
+# *간접적으로* 주입할 수 있어, href/src 등 이름으로만 검사하는 방식을 완전히
+# 우회한다 — 속성 이름/값 조합을 흉내 내 막기보다, 이 요소들 자체를 위험 태그로
+# 취급해 통째로 제거한다.
+_DANGEROUS_TAG_NAMES = {
+    "script", "iframe", "object", "embed", "style", "link",
+    "animate", "set", "animatemotion", "animatetransform",
+}
 # 보안 검증 발견(PR 리뷰, 4차): href/src만 스킴을 검사해 <form action="javascript:...">,
 # formaction, SVG xlink:href 같은 다른 내비게이션 속성은 그대로 통과했다 — URL을
 # 담을 수 있는 속성을 폭넓게 검사한다.
@@ -85,6 +93,10 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x20]+")
 _VOID_ELEMENTS = {
     "area", "base", "br", "col", "embed", "hr", "img", "input",
     "link", "meta", "param", "source", "track", "wbr",
+    # SVG 애니메이션 요소도 스펙상 빈 콘텐츠 모델(자식/닫는 태그를 진짜로
+    # 필요로 하지 않음)이라, link/embed와 같은 이유로 여기 포함해 skip_depth가
+    # 영원히 안 풀리는 것을 방지한다.
+    "animate", "set", "animatemotion", "animatetransform",
 }
 
 

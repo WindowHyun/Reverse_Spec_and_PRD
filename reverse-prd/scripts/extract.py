@@ -194,8 +194,15 @@ def extract_routes(files: dict) -> list:
                 component, guard = _component_and_guard(block)
                 routes.append({"path": m_path.group(1), "component": component,
                                "guard": guard, "source": fname})
-        # React Router JSX: element={ ... } 전체를 캡처해 가드/컴포넌트 파싱
-        for m in re.finditer(r'<Route\s+path="([^"]+)"\s+element=\{(.*?)\}\s*/?>', src, re.S):
+        # React Router JSX: element={ ... } 전체를 캡처해 가드/컴포넌트 파싱.
+        # 보안 검증 발견(PR 리뷰): 파일 크기 상한(MAX_FILE_BYTES) 안에서도, 닫히지
+        # 않는 `<Route path="x" element={` 접두어가 대량 반복되면 이 무경계
+        # lazy `.*?`가 매 시작 위치마다 나머지 파일 끝까지 스캔해 실패하며
+        # 이차식으로 느려졌다(200KB 입력에서 12초+ 실측). 실제 route element JSX
+        # 블록은 보통 수백 자를 넘지 않으므로 4000자로 상한을 둬 매 시도 비용을
+        # 상수로 고정한다 — 상한을 넘는 비정상적으로 긴 element 블록은 매칭
+        # 실패로 처리되어 건너뛴다(다른 정상 라우트 추출에는 영향 없음).
+        for m in re.finditer(r'<Route\s+path="([^"]+)"\s+element=\{(.{0,4000}?)\}\s*/?>', src, re.S):
             component, guard = _component_and_guard(m.group(2))
             routes.append({"path": m.group(1), "component": component,
                            "guard": guard, "source": fname})

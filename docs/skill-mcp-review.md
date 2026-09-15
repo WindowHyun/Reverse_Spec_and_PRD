@@ -437,6 +437,34 @@ extract→render HTML 파이프라인 재실행으로 정상 렌더링 확인.
 재통과(ReDoS 2종·따옴표 우회·엔티티 우회·코드스팬 보존) + mock-shop 결정성
 + 전체 파이프라인 재실행.
 
+### 13.4 파일 크기 상한 안에서도 남아있던 ReDoS + SVG 간접 속성 주입 (2026-09-15)
+
+리뷰봇이 처음으로 **render.py가 아닌 extract.py**에서, 그리고 render.py에서는
+`_URL_ATTRS` 확장 직후 다시 하나를 더 찾았다.
+
+- **P1 — extract.py `extract_routes`의 JSX 라우트 정규식**: `element=\{(.*?)\}`의
+  무경계 lazy 매칭이, MAX_FILE_BYTES(2MB) 상한 *안에 드는* 파일에서도 여전히
+  이차식으로 느렸다 — 닫히지 않는 `<Route path="x" element={` 접두어를 반복한
+  200KB 파일에서 12초 이상 실측(파일 크기 상한만으로는 이 특정 정규식의 최악
+  케이스를 못 막는다는 지적). `element={...}` 내용 캡처를 4000자로 상한을 둔
+  `(.{0,4000}?)`로 교체 — 실제 route JSX 블록은 보통 수백 자 이내라 정상 추출에는
+  영향이 없고, 200KB 입력이 8.76초 → 0.32초로, 파일 크기 상한 한계치인 2MB
+  입력도 3.2초로 줄어듦을 확인(정상 라우트 추출 결과는 동일함을 별도 검증).
+- **P1 — render.py: SVG 애니메이션 요소를 통한 간접 속성 주입**: `_URL_ATTRS`
+  확장 직후, `<animate attributeName="href" values="javascript:...">`처럼
+  SVG SMIL 애니메이션으로 href 값을 *간접* 주입하는 경로가 남아 있었다 — 속성
+  이름이 `href`/`src`가 아니라서 §13.3의 확장으로도 못 잡았다. 속성 이름/값
+  조합을 추가로 흉내 내는 대신, `<animate>/<set>/<animateMotion>/
+  <animateTransform>` 자체를 위험 태그 목록에 추가해 통째로 제거하는 쪽을
+  택했다(SVG 스펙상 이 요소들은 빈 콘텐츠 모델이라 `_VOID_ELEMENTS`에도 함께
+  추가해, §13.3에서 고친 것과 같은 "닫는 태그를 영원히 기다리는" 문제가 재발하지
+  않도록 함).
+
+재검증: 두 재현 케이스 모두 해결 + `<svg><set attributeName="href" to="javascript:...">`
+같은 형제 케이스 + 슬래시 없이 닫힌 `<animate>`가 뒤 문서를 삼키지 않는지
+(§13.3 회귀 방지) + 정상 라우트 추출 결과 불변 + mock-shop 결정성(2회 해시
+동일) + 전체 extract→render 파이프라인 재실행.
+
 ---
 
 ### 출처
