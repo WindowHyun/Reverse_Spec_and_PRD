@@ -22,12 +22,12 @@ allowed-tools 를 `Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)` 로 좁힐 수 �
 """
 import argparse
 import datetime
+import html
 import pathlib
 import re
 import sys
-
-
 import urllib.parse
+from html.parser import HTMLParser
 
 # PDF 렌더링 중 실제로 외부에서 가져올 필요가 있는 리소스는 구글 폰트뿐이다.
 # 그 외 호스트/스킴을 전부 막아 SSRF(내부망·클라우드 메타데이터 주소 접근) 표면을
@@ -54,50 +54,118 @@ def _pdf_url_fetcher(url: str, *args, **kwargs):
     return default_url_fetcher(url, *args, **kwargs)
 
 
-# 보안 검증 발견(재검토, PR 리뷰): 여는/닫는 태그를 통째로 한 쌍으로 매칭하려던
-# 이전 버전(`<script>...내용...</script>` 전체를 `.*?`로 탐색)은, 닫히지 않는
-# `<script>` 토큰이 반복되는 적대적 입력에서 각 시작 위치마다 나머지 문서
-# 전체를 상대로 백트래킹해 초선형(superlinear) 시간이 걸렸다 — 1,000개 반복
-# (~8KB)만으로 10초 이상 걸리는 CPU DoS가 실측 재현됨. 여는/닫는 태그를 각각
-# 개별적으로(내용은 남기고 태그만) 제거하는 방식으로 바꿔 매 매치가 다음 `>`
-# 하나로 폭이 정해지는 선형 시간 패턴으로 교체했다 — 내용이 페이지에 텍스트로
-# 남더라도 실행 가능한 태그 자체가 사라지므로 목적(스크립트 실행 차단)은
-# 동일하게 달성된다.
-_DANGEROUS_TAGS = re.compile(
-    r"<\s*/?\s*(?:script|iframe|object|embed|style|link)\b[^>]*>", re.I)
-# 진짜 태그(<...>) 구간에서만 이벤트 속성/위험 스킴을 다듬는다 — 코드스팬 등
-# 이미 HTML 엔티티로 이스케이프된 텍스트는 리터럴 `<`/`>`가 없어 이 패턴에
-# 매칭되지 않으므로 건드리지 않는다.
-_TAG = re.compile(r"<[a-zA-Z][^<>]*>")
-_EVENT_ATTR = re.compile(r'\son\w+\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)', re.I)
-# 보안 검증 발견(재검토, PR 리뷰): 값이 따옴표로 감싸여 있을 때만 매칭해,
-# `href=javascript:alert(1)`처럼 따옴표 없는 속성값은 그대로 통과시켰다 —
-# 따옴표는 선택 사항으로 바꿔 두 형태 모두 잡는다.
-_DANGEROUS_SCHEME_ATTR = re.compile(
-    r'\b(href|src)(\s*=\s*)(["\']?)\s*(javascript:|vbscript:|data:text/html)', re.I)
+# 보안 검증 발견 3연전(재검토, PR 리뷰): 정규식으로 손수 짠 태그/속성 경계
+# 탐지는 세 차례 연속으로 우회가 나왔다 —
+#   1) 여는/닫는 태그를 통째로 페어 매칭(`.*?`)하면 안 닫히는 <script> 반복에서
+#      초선형 백트래킹(1,000회 반복만으로 10초+ CPU DoS).
+#   2) 그래서 태그를 "개별적으로 다음 `>`까지"로 바꿨더니, `>`가 전혀 없는
+#      <script 접두어가 대량 반복될 때 매 시작 위치마다 나머지 문서 끝까지
+#      스캔하다 실패하는 패턴이 남아 여전히 이차식으로 느렸다(32,000회 반복 ~4.6초).
+#   3) `[^<>]*`로 태그 경계를 잡으면 `<img title=">" onerror=...>`처럼 따옴표
+#      속성값 안의 리터럴 `>`에서 태그가 조기 종료돼 onerror가 경계 밖으로
+#      빠져나갔고, HTML 문자 참조(`&#x61;script:`)로 인코딩한 스킴은 브라우저는
+#      디코딩해서 실행하지만 리터럴 문자열 매칭 정규식은 못 잡았다.
+# 세 문제 모두 "정규식으로 태그 경계/인용부호/엔티티를 직접 흉내 내려 한 것"이
+# 근본 원인이라, 표준 라이브러리의 실제 HTML 토크나이저(html.parser.HTMLParser —
+# 신규 의존성 없음, 단일 패스로 선형 동작, 인용부호·엔티티를 스펙대로 처리)로
+# 교체했다. 위험 태그(및 그 내용)는 통째로 버리고, 남는 태그는 이벤트 속성 제거·
+# URL 스킴 정규화 후 재직렬화한다.
+_DANGEROUS_TAG_NAMES = {"script", "iframe", "object", "embed", "style", "link"}
+_URL_ATTRS = {"href", "src"}
+_CONTROL_CHARS = re.compile(r"[\x00-\x20]+")
 
 
-def _clean_tag(m: "re.Match") -> str:
-    tag = m.group(0)
-    tag = _EVENT_ATTR.sub("", tag)
-    tag = _DANGEROUS_SCHEME_ATTR.sub(r"\1\2\3blocked:", tag)
-    return tag
+def _has_dangerous_scheme(value: str) -> bool:
+    """브라우저는 URL 스킴 판정 전에 문자 참조를 디코딩하고 탭/개행/제어문자를
+    무시한다 — HTMLParser가 attrs를 넘길 때 이미 문자 참조는 디코딩된 상태이므로,
+    여기서는 제어문자만 제거하고 대소문자 무시로 스킴 접두어를 비교한다."""
+    if value is None:
+        return False
+    normalized = _CONTROL_CHARS.sub("", value).lower()
+    return normalized.startswith(("javascript:", "vbscript:", "data:text/html"))
 
 
-def _sanitize_html_fragment(html: str) -> str:
+class _HtmlSanitizer(HTMLParser):
+    """위험 태그(및 그 내용)를 제거하고, 남는 태그의 `on*=` 이벤트 속성과
+    `javascript:`/`vbscript:`/`data:text/html` URL 스킴을 무력화한 뒤 재직렬화한다.
+    convert_charrefs=False로 두어 일반 텍스트(코드스팬 등 이미 이스케이프된 내용
+    포함)는 원문 그대로(엔티티 표기 보존) 통과시킨다 — 디코딩 후 그대로 재출력하면
+    `&lt;`가 리터럴 `<`로 부활해 구조를 재주입할 위험이 있기 때문."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.out = []
+        self._skip_depth = 0
+
+    def _open(self, tag, attrs, self_closing):
+        tl = tag.lower()
+        if tl in _DANGEROUS_TAG_NAMES:
+            if not self_closing:
+                self._skip_depth += 1
+            return
+        if self._skip_depth:
+            return
+        cleaned = []
+        for name, value in attrs:
+            nl = name.lower()
+            if nl.startswith("on"):
+                continue
+            if nl in _URL_ATTRS and _has_dangerous_scheme(value):
+                value = "blocked:" + value
+            cleaned.append((name, value))
+        self.out.append(self._serialize(tag, cleaned, self_closing))
+
+    @staticmethod
+    def _serialize(tag, attrs, self_closing):
+        parts = [f"<{tag}"]
+        for name, value in attrs:
+            if value is None:
+                parts.append(f" {name}")
+            else:
+                parts.append(f' {name}="{html.escape(value, quote=True)}"')
+        parts.append("/>" if self_closing else ">")
+        return "".join(parts)
+
+    def handle_starttag(self, tag, attrs):
+        self._open(tag, attrs, self_closing=False)
+
+    def handle_startendtag(self, tag, attrs):
+        self._open(tag, attrs, self_closing=True)
+
+    def handle_endtag(self, tag):
+        if tag.lower() in _DANGEROUS_TAG_NAMES:
+            if self._skip_depth:
+                self._skip_depth -= 1
+            return
+        if not self._skip_depth:
+            self.out.append(f"</{tag}>")
+
+    def handle_data(self, data):
+        if not self._skip_depth:
+            self.out.append(data)
+
+    def handle_entityref(self, name):
+        if not self._skip_depth:
+            self.out.append(f"&{name};")
+
+    def handle_charref(self, name):
+        if not self._skip_depth:
+            self.out.append(f"&#{name};")
+
+    def handle_comment(self, data):
+        pass  # 주석은 통째로 버린다 (조건부 주석류 트릭 방지, 내용 손실은 무해)
+
+
+def _sanitize_html_fragment(html_text: str) -> str:
     """python-markdown은 raw HTML을 기본적으로 그대로 통과시킨다(safe_mode 없음).
     표 셀 텍스트는 extract.py의 _escape_cell이 이미 이스케이프하지만, Step 2/3에서
     LLM이 메시지 원문을 표가 아닌 본문 서술로 옮겨 적으면 그 경로는 보호되지
     않는다 — 렌더링 최종 단계의 방어선(defense-in-depth)으로 실행 가능한 태그·
-    이벤트 핸들러·스크립트성 URL 스킴을 무력화한다.
-
-    처음 구현에서 이벤트 속성 정규식을 문서 전체에 바로 적용했더니, 코드스팬
-    안의 (이미 이스케이프된) 예시 문구 뒤에 오는 `&gt;` 같은 엔티티까지 값으로
-    먹어치워 원문을 훼손했다(재검증 발견) — 실제 태그(`<...>`) 구간으로만
-    범위를 좁혀 텍스트 콘텐츠는 절대 건드리지 않도록 고쳤다."""
-    html = _DANGEROUS_TAGS.sub("", html)
-    html = _TAG.sub(_clean_tag, html)
-    return html
+    이벤트 핸들러·스크립트성 URL 스킴을 무력화한다."""
+    parser = _HtmlSanitizer()
+    parser.feed(html_text)
+    parser.close()
+    return "".join(parser.out)
 
 
 def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
