@@ -294,6 +294,18 @@ def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch:
     while i < n:
         ch = src[i]
 
+        # 정확성 검증 발견(PR 리뷰): `<Page /> /* don't */`처럼 코드 맥락의
+        # 블록 주석 안에 아포스트로피가 있으면, 주석을 인식 못 하고 그 안의
+        # 따옴표를 문자열 시작으로 오인해 §13.7과 같은 증상(스캔이 EOF까지
+        # 튀어 -1 반환)이 재발했다 — `_blank_full_line_comments`는 줄 전체
+        # `//` 주석만 지우고 블록 주석은 reference.md 1-I에 명시된 대로 원래
+        # 처리 대상이 아니었다. 코드 맥락에서 `/*`를 보면 대응하는 `*/`까지
+        # (없으면 파일 끝까지) 통째로 건너뛴다.
+        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "*":
+            end = src.find("*/", i + 2)
+            i = end + 2 if end != -1 else n
+            continue
+
         if mode == "code" and ch in ("'", '"', "`"):
             i = _skip_delimited(i + 1, ch)
             continue
@@ -510,27 +522,70 @@ def _iter_fetch_calls(src: str):
     starts = {m.start() + 5: m.group(1) for m in _FETCH_START.finditer(src)}  # '(' 위치 -> endpoint
     if not starts:
         return
-    stack: list = []  # [(그 호출의 '('을 지날 때의 깊이, endpoint, '(' 위치), ...]
-    depth, quote, i, n = 0, None, 0, len(src)
+    # 정확성 검증 발견(PR 리뷰): 템플릿 리터럴을 백틱째로 통째 건너뛰는
+    # (`${...}` 보간을 코드가 아니라 그냥 문자열 내용으로 취급하는) 방식은,
+    # `` `resp: ${fetch("/inner")}` `` 처럼 보간 **안에** 있는 fetch 호출을
+    # 아예 못 봤다 — `$`+`{` 를 만나면 보간이 끝나는 대응 `}`까지는 다시 code
+    # 맥락(괄호/따옴표 정상 추적)으로 들어가야 한다. `{`/`}`는 라우트
+    # 스캐너와 같은 스택 방식(여는 시점의 mode를 저장했다가 닫는 시점에
+    # 복원)으로 다뤄, 보간 안의 일반 객체 리터럴 `{}`과도 구분한다.
+    stack: list = []         # [(그 호출의 '('을 지날 때의 깊이, endpoint, '(' 위치), ...]
+    brace_modes: list = []   # `{`를 열 때 mode를 저장, 대응 `}`에서 복원 (템플릿 보간용)
+    mode = "code"            # "code" | "template"
+    depth, i, n = 0, 0, len(src)
     while i < n:
         ch = src[i]
-        if quote:
+
+        if mode == "code" and ch in ("'", '"'):
+            q = ch
+            j = i + 1
+            while j < n and src[j] != q:
+                j += 2 if src[j] == "\\" else 1
+            i = j + 1
+            continue
+
+        if mode == "code" and ch == "`":
+            mode = "template"
+            i += 1
+            continue
+
+        if mode == "template":
             if ch == "\\":
                 i += 2
                 continue
-            if ch == quote:
-                quote = None
-        elif ch in ("'", '"', "`"):
-            quote = ch
-        elif ch == "(":
+            if ch == "`":
+                mode = "code"  # 백틱 문자열은 항상 code 모드에서 시작하므로 닫히면 code로
+                i += 1
+                continue
+            if ch == "$" and i + 1 < n and src[i + 1] == "{":
+                brace_modes.append("template")
+                mode = "code"
+                i += 2
+                continue
+            i += 1
+            continue
+
+        if ch == "{":
+            brace_modes.append("code")
+            i += 1
+            continue
+        if ch == "}":
+            mode = brace_modes.pop() if brace_modes else "code"
+            i += 1
+            continue
+        if ch == "(":
             depth += 1
             if i in starts:
                 stack.append((depth, starts[i], i))
-        elif ch == ")":
+            i += 1
+            continue
+        if ch == ")":
             if stack and stack[-1][0] == depth:
                 _, endpoint, paren_idx = stack.pop()
                 yield endpoint, src[paren_idx:i + 1]
             depth -= 1
+            i += 1
+            continue
         i += 1
 
 
@@ -788,6 +843,16 @@ def extract_secret_findings(root: pathlib.Path) -> list:
         # .vue 도 스캔 대상에 포함 (SRC_EXT엔 있으면서 시크릿 스캔에선 빠져있던 비일관 수정)
         if p.suffix in (".ts", ".tsx", ".js", ".jsx", ".vue", ".json", ".yml", ".yaml"):
             try:
+                # 보안 검증 발견(PR 리뷰): read_sources()의 MAX_FILE_BYTES 상한은
+                # 이 시크릿 스캔 경로를 거치지 않는다 — 일반 소스 파일 하나와
+                # 거대한 파일 하나가 같이 있는 디렉터리를 대상으로 주면, 거대한
+                # 파일이 read_sources()에서는 건너뛰어져도 여기서는 별도로
+                # 다시 읽혀 상한 없이 모든 정규식을 그대로 돌았다 — 동일한
+                # 상한을 여기에도 적용한다.
+                if p.stat().st_size > MAX_FILE_BYTES:
+                    print(f"⚠️  시크릿 스캔에서 건너뜀(파일 크기 {p.stat().st_size:,}B > 상한): {p}",
+                          file=sys.stderr)
+                    continue
                 text = p.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
                 continue
