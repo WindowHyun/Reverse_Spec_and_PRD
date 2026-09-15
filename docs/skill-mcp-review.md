@@ -877,6 +877,45 @@ fetch 스캐너가 §13.13에서 이미 검증한 것과 같은 설계를 그대
 
 ---
 
+### 13.18 `await` 뒤 정규식, if-return 스캐너의 템플릿 보간, `return` 뒤 JSX (2026-09-15)
+
+세 스캐너에 걸쳐 세 건이 한 라운드에 보고됐다 — 모두 §13.16/§13.17에서
+이미 검증한 "표현식이 새로 시작하는 자리 vs 값이 방금 끝난 자리" 해소
+규칙과 "템플릿 보간은 코드 맥락으로 재진입" 설계를 다른 스캐너/다른
+키워드로 확장하면 되는 것들이었다.
+
+1. **`await` 뒤 정규식 리터럴 (fetch 스캐너)**: `const ok = await
+   /don't/.test(value); fetch("/real")`에서 `await`가 `_EXPRESSION_START_KEYWORDS`
+   (구 `_REGEX_PRECEDING_KEYWORDS`) 목록에 없어 `/`를 나눗셈으로,
+   아포스트로피를 문자열 시작으로 오판해 뒤의 정상 fetch 호출을 놓쳤다.
+   `await`를 목록에 추가(이름도 규칙이 `_looks_like_operator_lt`에도
+   재사용되며 "정규식 전용"이 아니게 돼 `_EXPRESSION_START_KEYWORDS`로
+   변경).
+
+2. **if-return 스캐너의 템플릿 보간 (`extract_rules`/`extract_messages`)**:
+   `` const msg = `${(() => { if (x) return "bad"; })()}`; `` 에서
+   `_find_if_return_pairs`가 백틱 문자열을 "다음 백틱까지 통째로"
+   건너뛰는 단순 플래그(`quote`)만 쓰고 있어, 보간 **안의** if-return을
+   전혀 못 봤다 — fetch/route 스캐너가 §13.13/§13.17에서 이미 검증한
+   `mode`("code"/"template") + `brace_modes` 스택 설계를 그대로 포팅했다.
+   홑/쌍따옴표는 보간이 없으므로 기존 단순 플래그를 유지.
+
+3. **`return` 뒤 JSX (라우트 스캐너)**: `element={(() => { return
+   <Page>Don't stop</Page>; })()}`에서 `<` 직전 단어가 `return`이라
+   `_looks_like_operator_lt`가 식별자 문자로 끝난 것으로 보아 비교연산자로
+   오판, 그 뒤 아포스트로피를 문자열 시작으로 잘못 보아 이 라우트뿐 아니라
+   파일의 나머지 라우트까지 전부 놓쳤다 — `_looks_like_regex_start`와 같은
+   키워드 뒤집기 규칙을 `_looks_like_operator_lt`에도 추가, 두 함수가
+   공유하는 `_EXPRESSION_START_KEYWORDS`를 참조하도록 했다.
+
+재검증: 세 재현 케이스 모두 수정 전 실패 → 수정 후 통과 확인. 회귀
+방지로 기존 `_looks_like_operator_lt`/`_looks_like_regex_start` 동작
+(`a <b && c` 비교연산자, `<Page label="{" />` 자체닫힘 `/`가 정규식이
+아님, `</div>` 닫는 태그) 재검증. mock-shop 라우트 8개·API 호출 2개·
+2회 해시 결정성 불변.
+
+---
+
 ### 출처
 
 - https://code.claude.com/docs/en/skills.md (프론트매터 필드 표, 디렉토리 구조, `${CLAUDE_SKILL_DIR}`)

@@ -183,9 +183,9 @@ def _basename_no_ext(path: str) -> str:
     return base.split(".")[0] or path
 
 
-_REGEX_PRECEDING_KEYWORDS = {
+_EXPRESSION_START_KEYWORDS = {
     "return", "throw", "yield", "case", "typeof", "instanceof",
-    "in", "of", "new", "delete", "void", "do", "else",
+    "in", "of", "new", "delete", "void", "do", "else", "await",
 }
 
 
@@ -213,7 +213,12 @@ def _looks_like_regex_start(src: str, idx: int) -> bool:
     끝나서 "값이 방금 끝난 자리"로 오판돼 나눗셈으로 잘못 판정했다 — 이런
     키워드 뒤는 항상 새 표현식이 시작하는 자리이지 값이 끝난 자리가 아니다.
     직전 단어가 이 키워드 목록에 있으면 식별자 문자로 끝나더라도 정규식
-    시작으로 뒤집는다."""
+    시작으로 뒤집는다.
+
+    정확성 검증 발견 4차(PR 리뷰): `await /don't/.test(value); fetch("/real")`
+    처럼 `await` 뒤에 오는 경우가 앞선 키워드 목록에 없어 여전히 나눗셈으로
+    오판, 뒤의 정상 fetch 호출까지 놓쳤다 — `await`도 항상 표현식이 새로
+    시작하는 자리이므로 같은 목록에 추가했다."""
     j = idx - 1
     while j >= 0 and src[j] in " \t\r\n":
         j -= 1
@@ -223,7 +228,7 @@ def _looks_like_regex_start(src: str, idx: int) -> bool:
             while k >= 0 and (src[k].isalnum() or src[k] in "_$"):
                 k -= 1
             word = src[k + 1:j + 1]
-            if word in _REGEX_PRECEDING_KEYWORDS:
+            if word in _EXPRESSION_START_KEYWORDS:
                 return True
         return False
     return True
@@ -275,11 +280,27 @@ def _looks_like_operator_lt(src: str, idx: int) -> bool:
     `<`가 자주 나오는 입력에서 매 호출마다 최악의 경우 idx에 비례해 훑을 수
     있어(앵커링에도 불구하고) 다시 이차식 비용을 재도입할 위험이 있었다 —
     정규식 대신 공백만 건너뛰는 짧은 역방향 문자 스캔으로 바꿔, 호출당 비용이
-    직전 공백 런 길이에만 비례하도록(사실상 상수) 만들었다."""
+    직전 공백 런 길이에만 비례하도록(사실상 상수) 만들었다.
+
+    정확성 검증 발견(PR 리뷰): `element={(() => { return <Page>Don't stop</Page>; })()}`
+    처럼 중첩 함수 안에서 `return` 뒤에 JSX가 오면, `<` 직전 단어가 `return`이라
+    식별자 문자로 끝나 "값이 방금 끝난 자리"로 오판, 비교연산자로 잘못
+    판정했다(`_looks_like_regex_start`가 겪은 것과 같은 문제) — 직전 단어가
+    `_EXPRESSION_START_KEYWORDS`에 있으면 식별자 문자로 끝나더라도 태그
+    시작(연산자 아님)으로 뒤집는다."""
     j = idx - 1
     while j >= 0 and src[j] in " \t\r\n":
         j -= 1
-    return j >= 0 and (src[j].isalnum() or src[j] in "_$)]}")
+    if j >= 0 and (src[j].isalnum() or src[j] in "_$)]}"):
+        if src[j].isalnum() or src[j] == "_" or src[j] == "$":
+            k = j
+            while k >= 0 and (src[k].isalnum() or src[k] in "_$"):
+                k -= 1
+            word = src[k + 1:j + 1]
+            if word in _EXPRESSION_START_KEYWORDS:
+                return False
+        return True
+    return False
 
 
 _GENERIC_CONSTRAINT_KEYWORDS = ("extends",)
@@ -794,12 +815,23 @@ def _find_if_return_pairs(src: str) -> list:
     교체했다 — `if (cond1) { if (cond2) {...} }`처럼 조건 문자열 안에
     다른 if가 텍스트로 등장하는 경우(예: 함수 인자 콜백 안)에도 안쪽 것을
     놓치지 않는다. 문자열/템플릿 리터럴 안의 괄호도 깊이에서 제외한다
-    (조건 안에 `)`를 포함한 문자열 리터럴이 있어도 깨지지 않도록)."""
+    (조건 안에 `)`를 포함한 문자열 리터럴이 있어도 깨지지 않도록).
+
+    정확성 검증 발견(PR 리뷰): 템플릿 리터럴을 백틱째로 통째 건너뛰는(보간
+    `${...}`을 그냥 문자열 내용으로 취급하는) 방식은, `` `${(() => { if (x)
+    return "bad"; })()}` `` 처럼 보간 **안에** 있는 if-return을 아예 못 봤다
+    — fetch/route 스캐너의 §13.13/§13.17과 같은 근본 문제라 같은 해법을
+    적용했다: `mode`("code"/"template")로 백틱 문자열 안팎을 구분하고,
+    `${`를 만나면 대응하는 `}`까지 `brace_modes` 스택으로 code 맥락에
+    되돌아가(보간 안의 if-return도 정상 스캔), 그 `}`에서 template 모드로
+    복원한다. 홑/쌍따옴표는 보간이 없으므로 기존처럼 단순 플래그로 다룬다."""
     starts = {src.index("(", m.start()) for m in _IF_PAREN.finditer(src)}
     if not starts:
         return []
     pairs = []
     stack: list = []  # [(그 if의 '('을 지날 때의 깊이, '(' 위치), ...]
+    brace_modes: list = []  # `{`를 열 때 mode를 저장, 대응 `}`에서 복원 (템플릿 보간용)
+    mode = "code"            # "code" | "template"
     depth, quote, i, n = 0, None, 0, len(src)
     while i < n:
         ch = src[i]
@@ -814,24 +846,51 @@ def _find_if_return_pairs(src: str) -> list:
         # 정확성 검증 발견(PR 리뷰): 라우트/fetch 스캐너와 같은 문제 —
         # `/* don't */ if (x) return "bad"`처럼 조건 앞뒤 블록 주석 안의
         # 아포스트로피를 문자열 시작으로 오인하면 이 if 전체를 못 찾았다.
-        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "*":
             end = src.find("*/", i + 2)
             i = end + 2 if end != -1 else n
             continue
         # `//`는 공백 없이 붙으면 `_blank_full_line_comments`가 안 지운다 —
         # 마찬가지로 개행까지 건너뛴다.
-        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "/":
             nl = src.find("\n", i + 2)
             i = nl + 1 if nl != -1 else n
             continue
         # `/don't/.test(x)`류 정규식 리터럴 안의 아포스트로피도 같은 이유로
         # 문자열 시작으로 오인될 수 있어 마찬가지로 건너뛴다.
-        if (ch == "/" and i + 1 < n and src[i + 1] != "/"
+        if (mode == "code" and ch == "/" and i + 1 < n and src[i + 1] != "/"
                 and _looks_like_regex_start(src, i)):
             i = _skip_regex_literal(src, i)
             continue
-        if ch in ("'", '"', "`"):
+        if mode == "code" and ch in ("'", '"'):
             quote = ch
+            i += 1
+            continue
+        if mode == "code" and ch == "`":
+            mode = "template"
+            i += 1
+            continue
+        if mode == "template":
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == "`":
+                mode = "code"
+                i += 1
+                continue
+            if ch == "$" and i + 1 < n and src[i + 1] == "{":
+                brace_modes.append("template")
+                mode = "code"
+                i += 2
+                continue
+            i += 1
+            continue
+        if ch == "{":
+            brace_modes.append("code")
+            i += 1
+            continue
+        if ch == "}":
+            mode = brace_modes.pop() if brace_modes else "code"
             i += 1
             continue
         if ch == "(":
