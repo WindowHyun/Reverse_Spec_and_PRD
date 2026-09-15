@@ -26,6 +26,12 @@ import sys
 
 SRC_EXT = (".tsx", ".ts", ".jsx", ".js", ".vue", ".html")
 
+# 보안/가용성: 이 스크립트는 신뢰 못 할(적대적일 수 있는) 코드를 정규식으로 분석한다.
+# 비정상적으로 거대한 단일 파일(예: 실수로 포함된 번들/난독화 파일, 혹은 의도적으로
+# 심어진 파일)은 route/API 등 추출기의 백트래킹 가능한 정규식과 결합해 CPU를
+# 과도하게 소모시킬 수 있다 — 상한을 넘는 파일은 분석에서 제외한다.
+MAX_FILE_BYTES = 2_000_000
+
 # 라우트 element를 감싸는 흔한 래퍼/HOC — 페이지 컴포넌트 판정 시 건너뛴다.
 WRAPPER_COMPONENTS = {
     "RequireAuth", "ProtectedRoute", "PrivateRoute", "AuthGuard", "Suspense",
@@ -136,8 +142,12 @@ def read_sources(root: pathlib.Path) -> dict:
             continue
         if p.suffix in SRC_EXT or p.name == "package.json":
             try:
+                if p.stat().st_size > MAX_FILE_BYTES:
+                    print(f"⚠️  건너뜀(파일 크기 {p.stat().st_size:,}B > 상한): {p}",
+                          file=sys.stderr)
+                    continue
                 text = p.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
+            except (UnicodeDecodeError, OSError):
                 continue
             if p.name != "package.json":
                 text = _blank_full_line_comments(text)

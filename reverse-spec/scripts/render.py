@@ -27,15 +27,66 @@ import re
 import sys
 
 
+import urllib.parse
+
+# PDF 렌더링 중 실제로 외부에서 가져올 필요가 있는 리소스는 구글 폰트뿐이다.
+# 그 외 호스트/스킴을 전부 막아 SSRF(내부망·클라우드 메타데이터 주소 접근) 표면을
+# "file:// 차단"보다 넓게 차단한다 — 분석 대상 코드에서 뽑아낸 문구가 이스케이프
+# 없이 본문에 섞여 `<img src="http://169.254.169.254/...">` 같은 태그가 되더라도
+# 이 fetcher가 요청 자체를 거부한다.
+_ALLOWED_FETCH_HOSTS = {"fonts.googleapis.com", "fonts.gstatic.com"}
+
+
 def _pdf_url_fetcher(url: str, *args, **kwargs):
-    """weasyprint용 URL fetcher. 보안 검증 발견: 기본 fetcher가 file:// 스킴을
-    그대로 가져와, 분석 대상이 통제 못하는 문서에 `<link href="file:///etc/passwd">`
-    같은 참조가 있으면 로컬 파일을 읽어 PDF에 임베드할 수 있었다(정보 노출).
-    file:/ 로컬 파일 스킴은 차단하고, 그 외(https 웹폰트 등)만 기본 처리한다."""
+    """weasyprint용 URL fetcher.
+
+    보안 검증 발견 (1차): 기본 fetcher가 file:// 스킴을 그대로 가져와, 분석 대상이
+    통제 못하는 문서에 `<link href="file:///etc/passwd">` 같은 참조가 있으면 로컬
+    파일을 읽어 PDF에 임베드할 수 있었다(정보 노출).
+    보안 검증 발견 (2차, 재점검): file:// 만 막고 http(s)://는 전부 허용하고 있어,
+    SSRF로 내부망/클라우드 메타데이터 엔드포인트(예: http://169.254.169.254/...)에
+    접근할 수 있는 여지가 남아 있었다. https + 알려진 폰트 호스트만 허용하는
+    화이트리스트로 좁힌다(그 외 스킴·호스트는 전부 거부)."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_FETCH_HOSTS:
+        raise ValueError(f"보안: 허용되지 않은 외부 리소스 참조 차단됨 ({url[:60]})")
     from weasyprint.urls import default_url_fetcher
-    if url.lower().startswith("file:"):
-        raise ValueError(f"보안: 로컬 파일 참조 차단됨 ({url[:40]})")
     return default_url_fetcher(url, *args, **kwargs)
+
+
+_DANGEROUS_TAGS = re.compile(
+    r"<\s*(script|iframe|object|embed|style|link)\b.*?(?:/\s*>|>.*?<\s*/\s*\1\s*>)",
+    re.I | re.S)
+# 진짜 태그(<...>) 구간에서만 이벤트 속성/위험 스킴을 다듬는다 — 코드스팬 등
+# 이미 HTML 엔티티로 이스케이프된 텍스트는 리터럴 `<`/`>`가 없어 이 패턴에
+# 매칭되지 않으므로 건드리지 않는다.
+_TAG = re.compile(r"<[a-zA-Z][^<>]*>")
+_EVENT_ATTR = re.compile(r'\son\w+\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)', re.I)
+_DANGEROUS_SCHEME_ATTR = re.compile(
+    r'\b(href|src)(\s*=\s*)(["\'])\s*(javascript:|vbscript:|data:text/html)', re.I)
+
+
+def _clean_tag(m: "re.Match") -> str:
+    tag = m.group(0)
+    tag = _EVENT_ATTR.sub("", tag)
+    tag = _DANGEROUS_SCHEME_ATTR.sub(r"\1\2\3blocked:", tag)
+    return tag
+
+
+def _sanitize_html_fragment(html: str) -> str:
+    """python-markdown은 raw HTML을 기본적으로 그대로 통과시킨다(safe_mode 없음).
+    표 셀 텍스트는 extract.py의 _escape_cell이 이미 이스케이프하지만, Step 2/3에서
+    LLM이 메시지 원문을 표가 아닌 본문 서술로 옮겨 적으면 그 경로는 보호되지
+    않는다 — 렌더링 최종 단계의 방어선(defense-in-depth)으로 실행 가능한 태그·
+    이벤트 핸들러·스크립트성 URL 스킴을 무력화한다.
+
+    처음 구현에서 이벤트 속성 정규식을 문서 전체에 바로 적용했더니, 코드스팬
+    안의 (이미 이스케이프된) 예시 문구 뒤에 오는 `&gt;` 같은 엔티티까지 값으로
+    먹어치워 원문을 훼손했다(재검증 발견) — 실제 태그(`<...>`) 구간으로만
+    범위를 좁혀 텍스트 콘텐츠는 절대 건드리지 않도록 고쳤다."""
+    html = _DANGEROUS_TAGS.sub("", html)
+    html = _TAG.sub(_clean_tag, html)
+    return html
 
 
 def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
@@ -43,6 +94,7 @@ def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
     # python-markdown 코어에 취소선(~~text~~)이 없어 <del>로 선치환 (HTML/PDF 공통)
     md_text = re.sub(r"~~(.+?)~~", r"<del>\1</del>", md_text)
     body = markdown.markdown(md_text, extensions=["tables", "toc", "fenced_code"])
+    body = _sanitize_html_fragment(body)
     return f"""<!DOCTYPE html>
 <html lang="{lang}">
 <head>
@@ -316,8 +368,18 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    # 보안: --name은 "reverse_prd" 같은 파일명 접두어여야 하는데, 경로 구분자나
+    # ".."가 섞여 들어오면 out_dir 밖에 파일을 쓰는 경로 조작이 될 수 있다
+    # (이 스크립트는 에이전트가 분석 대상 코드/문서 내용을 바탕으로 인자를 구성해
+    # 호출하므로, 신뢰 못 할 입력이 --name까지 흘러들 가능성을 전제로 방어한다).
+    # 디렉터리 구성요소를 제거해 순수 파일명만 남긴다.
+    safe_name = pathlib.PurePosixPath(args.name.replace("\\", "/")).name or "reverse_doc"
+    if safe_name != args.name:
+        print(f"⚠️  --name 값을 안전한 파일명으로 정규화함: {args.name!r} → {safe_name!r}",
+              file=sys.stderr)
+
     for fmt in formats:  # 같은 타임스탬프로 세트 생성 (예: _104205.pdf + _104205.html)
-        out_path = out_dir / f"{args.name}_{ts}.{fmt}"
+        out_path = out_dir / f"{safe_name}_{ts}.{fmt}"
         if fmt == "pdf":
             render_pdf(md_text, out_path, args.title, args.accent, args.lang)
         elif fmt == "docx":
