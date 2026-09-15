@@ -225,7 +225,11 @@ def _looks_like_generic_params(src: str, idx: int) -> bool:
     (공백 허용) 첫 문자가 콤마면 제네릭으로 본다.
     정확성 검증 발견 2차(PR 리뷰): `<T extends object>`처럼 제약이 있는
     제네릭은 콤마 없이 `extends` 키워드로 이어져 1차 수정을 통과하지 못했다
-    — 식별자 뒤에 `extends` 키워드(단어 경계 확인)가 오는 경우도 같이 본다."""
+    — 식별자 뒤에 `extends` 키워드(단어 경계 확인)가 오는 경우도 같이 본다.
+    정확성 검증 발견 3차(PR 리뷰): `<T = unknown>`처럼 기본값이 있는 제네릭은
+    콤마도 `extends`도 없이 `=`로 이어져 앞선 두 수정 다 통과하지 못했다 —
+    식별자 뒤에 (다음 문자가 `=`나 `>`가 아닌, 즉 `==`/`===`/`=>`가 아닌)
+    단독 `=`가 오는 경우도 같이 본다."""
     j = idx + 1
     while j < len(src) and (src[j].isalnum() or src[j] in "_$"):
         j += 1
@@ -233,6 +237,8 @@ def _looks_like_generic_params(src: str, idx: int) -> bool:
     while k < len(src) and src[k] in " \t\r\n":
         k += 1
     if k < len(src) and src[k] == ",":
+        return True
+    if k < len(src) and src[k] == "=" and src[k + 1:k + 2] not in ("=", ">"):
         return True
     for kw in _GENERIC_CONSTRAINT_KEYWORDS:
         end = k + len(kw)
@@ -484,12 +490,6 @@ def _find_matching(src: str, open_idx: int, open_ch: str, close_ch: str) -> int:
     return -1
 
 
-def _find_matching_paren(src: str, open_idx: int) -> int:
-    """`(`에 대응하는 `)` 인덱스. 중첩 괄호 안전 (실전 검증에서 fetch(...) /
-    if(...) 정규식의 조기종료 버그를 잡기 위해 도입)."""
-    return _find_matching(src, open_idx, "(", ")")
-
-
 _FETCH_START = re.compile(r'fetch\(\s*[\'"`]([^\'"`]+)[\'"`]')
 
 
@@ -535,6 +535,15 @@ def _iter_fetch_calls(src: str):
     depth, i, n = 0, 0, len(src)
     while i < n:
         ch = src[i]
+
+        # 정확성 검증 발견(PR 리뷰): 라우트 스캐너의 §13.13과 같은 문제가
+        # fetch 스캐너에도 있었다 — `/* don't */`처럼 code 맥락의 블록 주석
+        # 안에 아포스트로피가 있으면 문자열 시작으로 오인해 그 뒤의 정상
+        # fetch 호출까지 못 봤다. 대응하는 `*/`까지(없으면 파일 끝까지) 건너뛴다.
+        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "*":
+            end = src.find("*/", i + 2)
+            i = end + 2 if end != -1 else n
+            continue
 
         if mode == "code" and ch in ("'", '"'):
             q = ch
@@ -624,6 +633,9 @@ def extract_constants(files: dict) -> list:
     return sorted(consts, key=lambda c: (c["name"], c["source"]))
 
 
+_IF_PAREN = re.compile(r"if\s*\(")
+
+
 def _find_if_return_pairs(src: str) -> list:
     """`if (조건) return "메시지"` 패턴을 중첩 괄호까지 고려해 찾는다.
     extract_rules와 extract_messages가 공유하는 헬퍼(중복 로직 통합).
@@ -631,19 +643,57 @@ def _find_if_return_pairs(src: str) -> list:
     정확성 검증 발견 후 개선:
     - 중괄호 블록형 early-return `if (cond) { return "msg" }` 지원
       (Prettier/ESLint curly 규칙상 오히려 주류 스타일인데 누락되고 있었음).
-    - 단따옴표/템플릿 리터럴 return 문자열도 지원(이전엔 큰따옴표만)."""
+    - 단따옴표/템플릿 리터럴 return 문자열도 지원(이전엔 큰따옴표만).
+
+    보안 검증 발견(PR 리뷰): 각 `if (` 발견마다 독립적으로 `_find_matching_paren`
+    을 불러 닫는 `)`를 찾았는데, fetch 스캐너가 §13.10~13.12에서 겪은 것과
+    같은 근본 원인이다 — 닫히지 않는 `if (` 접두어가 반복되면 매 발견마다
+    나머지 파일 끝까지 스캔해 이차식으로 느려졌다(32KB만으로 7초+). `if (`
+    발견 지점을 먼저 한 번의 `finditer`로 모아두고, 파일을 한 번만 훑으며
+    괄호 깊이를 스택으로 추적하는 §13.12의 fetch 스캐너와 같은 설계로
+    교체했다 — `if (cond1) { if (cond2) {...} }`처럼 조건 문자열 안에
+    다른 if가 텍스트로 등장하는 경우(예: 함수 인자 콜백 안)에도 안쪽 것을
+    놓치지 않는다. 문자열/템플릿 리터럴 안의 괄호도 깊이에서 제외한다
+    (조건 안에 `)`를 포함한 문자열 리터럴이 있어도 깨지지 않도록)."""
+    starts = {src.index("(", m.start()) for m in _IF_PAREN.finditer(src)}
+    if not starts:
+        return []
     pairs = []
-    for m in re.finditer(r"if\s*\(", src):
-        paren_idx = src.index("(", m.start())
-        close_idx = _find_matching_paren(src, paren_idx)
-        if close_idx == -1:
+    stack: list = []  # [(그 if의 '('을 지날 때의 깊이, '(' 위치), ...]
+    depth, quote, i, n = 0, None, 0, len(src)
+    while i < n:
+        ch = src[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
             continue
-        condition = src[paren_idx + 1:close_idx].strip()
-        # `)` 다음에 (선택적 `{` 블록 후) return "…"/'…'/`…` 이 오는지 확인
-        m2 = re.match(r'\s*\{?\s*return\s+(["\'`])(.*?)\1',
-                      src[close_idx + 1:close_idx + 400], re.S)
-        if condition and m2:
-            pairs.append((condition, m2.group(2).strip()))
+        if ch in ("'", '"', "`"):
+            quote = ch
+            i += 1
+            continue
+        if ch == "(":
+            depth += 1
+            if i in starts:
+                stack.append((depth, i))
+            i += 1
+            continue
+        if ch == ")":
+            if stack and stack[-1][0] == depth:
+                _, paren_idx = stack.pop()
+                condition = src[paren_idx + 1:i].strip()
+                # `)` 다음에 (선택적 `{` 블록 후) return "…"/'…'/`…` 이 오는지 확인
+                m2 = re.match(r'\s*\{?\s*return\s+(["\'`])(.*?)\1',
+                              src[i + 1:i + 400], re.S)
+                if condition and m2:
+                    pairs.append((condition, m2.group(2).strip()))
+            depth -= 1
+            i += 1
+            continue
+        i += 1
     return pairs
 
 
