@@ -183,6 +183,30 @@ def _basename_no_ext(path: str) -> str:
     return base.split(".")[0] or path
 
 
+def _looks_like_operator_lt(src: str, idx: int) -> bool:
+    """`<`가 JSX 태그 시작이 아니라 `a < b`류 비교/제네릭 연산자로 쓰인 것 같으면
+    True. 정확성 검증 발견(PR 리뷰, 4연속): `a <b && c > d ? <One/> : <Two/>`
+    처럼 공백 없이 붙은 `<식별자`는 태그 시작과 문법적으로 구분이 안 돼(TS 컴파일러
+    조차 겪는 유명한 모호성), 비교연산자를 태그로 오인해 그 `>`를 태그 종료로
+    잘못 소비하면서 실제 구조적 `}`를 지나쳐 스캔이 깨졌다. 표준적인 해소 규칙과
+    같은 방식으로: `<` 직전(공백 제외)이 식별자 문자나 닫는 괄호/대괄호/중괄호면
+    "값이 방금 끝난 자리"이므로 다음에 오는 `<`는 십중팔구 연산자다 — 반대로
+    `(`, `{`, `,`, `:`, `?`, 다른 연산자, 또는 시작 위치라면 "표현식이 새로 시작하는
+    자리"라 `<`는 태그 시작으로 본다. (`element={...}`는 문(statement)이 아니라
+    표현식만 오므로 `return <X/>`류로 식별자 뒤에 정당하게 태그가 오는 경우는
+    이 스캐너의 실제 사용 범위에서는 나타나지 않는다.)
+
+    보안 검증 발견(자체 재검토): 정규식 `search(src, 0, idx)`로 구현했다가,
+    `<`가 자주 나오는 입력에서 매 호출마다 최악의 경우 idx에 비례해 훑을 수
+    있어(앵커링에도 불구하고) 다시 이차식 비용을 재도입할 위험이 있었다 —
+    정규식 대신 공백만 건너뛰는 짧은 역방향 문자 스캔으로 바꿔, 호출당 비용이
+    직전 공백 런 길이에만 비례하도록(사실상 상수) 만들었다."""
+    j = idx - 1
+    while j >= 0 and src[j] in " \t\r\n":
+        j -= 1
+    return j >= 0 and (src[j].isalnum() or src[j] in "_$)]}")
+
+
 def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch: str) -> int:
     """`_find_matching`과 같되, "JSX 텍스트"와 "코드"(태그 속성/표현식) 맥락을
     구분해 코드 맥락의 문자열 리터럴 안 여는/닫는 문자는 깊이 계산에서
@@ -256,7 +280,14 @@ def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch:
             i += 1
             continue
 
-        if ch == "<" and i + 1 < n and (src[i + 1].isalpha() or src[i + 1] == "/"):
+        # `<`가 비교/제네릭 연산자로 오인될 수 있는 모호성은 "code" 맥락(표현식
+        # 안)에서만 존재한다 — "text" 맥락(JSX 자식)에서는 `<` 뒤에 문자/`/`가
+        # 오면 항상 자식 태그이거나 닫는 태그이므로 무조건 태그 시작으로 본다.
+        # (자체 재검토 발견: 처음엔 맥락 구분 없이 이 검사를 걸었다가
+        # `<div>Don't stop</div>`의 `</div>`가 "stop" 뒤(식별자 문자 뒤)에
+        # 온다는 이유로 태그가 아니라고 오판해 §13.7 회귀가 재발했었다.)
+        if (ch == "<" and i + 1 < n and (src[i + 1].isalpha() or src[i + 1] == "/")
+                and not (mode == "code" and _looks_like_operator_lt(src, i))):
             pending_tags.append((depth, src[i + 1] == "/", mode))
             mode = "code"
             i += 1
