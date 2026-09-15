@@ -22,20 +22,184 @@ allowed-tools 를 `Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)` 로 좁힐 수 �
 """
 import argparse
 import datetime
+import html
 import pathlib
 import re
 import sys
+import urllib.parse
+from html.parser import HTMLParser
+
+# PDF 렌더링 중 실제로 외부에서 가져올 필요가 있는 리소스는 구글 폰트뿐이다.
+# 그 외 호스트/스킴을 전부 막아 SSRF(내부망·클라우드 메타데이터 주소 접근) 표면을
+# "file:// 차단"보다 넓게 차단한다 — 분석 대상 코드에서 뽑아낸 문구가 이스케이프
+# 없이 본문에 섞여 `<img src="http://169.254.169.254/...">` 같은 태그가 되더라도
+# 이 fetcher가 요청 자체를 거부한다.
+_ALLOWED_FETCH_HOSTS = {"fonts.googleapis.com", "fonts.gstatic.com"}
 
 
 def _pdf_url_fetcher(url: str, *args, **kwargs):
-    """weasyprint용 URL fetcher. 보안 검증 발견: 기본 fetcher가 file:// 스킴을
-    그대로 가져와, 분석 대상이 통제 못하는 문서에 `<link href="file:///etc/passwd">`
-    같은 참조가 있으면 로컬 파일을 읽어 PDF에 임베드할 수 있었다(정보 노출).
-    file:/ 로컬 파일 스킴은 차단하고, 그 외(https 웹폰트 등)만 기본 처리한다."""
+    """weasyprint용 URL fetcher.
+
+    보안 검증 발견 (1차): 기본 fetcher가 file:// 스킴을 그대로 가져와, 분석 대상이
+    통제 못하는 문서에 `<link href="file:///etc/passwd">` 같은 참조가 있으면 로컬
+    파일을 읽어 PDF에 임베드할 수 있었다(정보 노출).
+    보안 검증 발견 (2차, 재점검): file:// 만 막고 http(s)://는 전부 허용하고 있어,
+    SSRF로 내부망/클라우드 메타데이터 엔드포인트(예: http://169.254.169.254/...)에
+    접근할 수 있는 여지가 남아 있었다. https + 알려진 폰트 호스트만 허용하는
+    화이트리스트로 좁힌다(그 외 스킴·호스트는 전부 거부)."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_FETCH_HOSTS:
+        raise ValueError(f"보안: 허용되지 않은 외부 리소스 참조 차단됨 ({url[:60]})")
     from weasyprint.urls import default_url_fetcher
-    if url.lower().startswith("file:"):
-        raise ValueError(f"보안: 로컬 파일 참조 차단됨 ({url[:40]})")
     return default_url_fetcher(url, *args, **kwargs)
+
+
+# 보안 검증 발견 3연전(재검토, PR 리뷰): 정규식으로 손수 짠 태그/속성 경계
+# 탐지는 세 차례 연속으로 우회가 나왔다 —
+#   1) 여는/닫는 태그를 통째로 페어 매칭(`.*?`)하면 안 닫히는 <script> 반복에서
+#      초선형 백트래킹(1,000회 반복만으로 10초+ CPU DoS).
+#   2) 그래서 태그를 "개별적으로 다음 `>`까지"로 바꿨더니, `>`가 전혀 없는
+#      <script 접두어가 대량 반복될 때 매 시작 위치마다 나머지 문서 끝까지
+#      스캔하다 실패하는 패턴이 남아 여전히 이차식으로 느렸다(32,000회 반복 ~4.6초).
+#   3) `[^<>]*`로 태그 경계를 잡으면 `<img title=">" onerror=...>`처럼 따옴표
+#      속성값 안의 리터럴 `>`에서 태그가 조기 종료돼 onerror가 경계 밖으로
+#      빠져나갔고, HTML 문자 참조(`&#x61;script:`)로 인코딩한 스킴은 브라우저는
+#      디코딩해서 실행하지만 리터럴 문자열 매칭 정규식은 못 잡았다.
+# 세 문제 모두 "정규식으로 태그 경계/인용부호/엔티티를 직접 흉내 내려 한 것"이
+# 근본 원인이라, 표준 라이브러리의 실제 HTML 토크나이저(html.parser.HTMLParser —
+# 신규 의존성 없음, 단일 패스로 선형 동작, 인용부호·엔티티를 스펙대로 처리)로
+# 교체했다. 위험 태그(및 그 내용)는 통째로 버리고, 남는 태그는 이벤트 속성 제거·
+# URL 스킴 정규화 후 재직렬화한다.
+# 보안 검증 발견(PR 리뷰, 5차): SVG 애니메이션 요소(`<animate>`, `<set>` 등)는
+# `attributeName="href"` + `values="javascript:..."` 조합으로 href 같은 속성값을
+# *간접적으로* 주입할 수 있어, href/src 등 이름으로만 검사하는 방식을 완전히
+# 우회한다 — 속성 이름/값 조합을 흉내 내 막기보다, 이 요소들 자체를 위험 태그로
+# 취급해 통째로 제거한다.
+# 보안 검증 발견(PR 리뷰, 6차): `<meta http-equiv="refresh" content="0;url=…">`는
+# href/src류 속성이 전혀 없이 `content` 값만으로 리더를 공격자 페이지로 즉시
+# 리다이렉트시킨다 — URL 속성 검사로는 원천적으로 못 잡는 패턴이라 `meta` 자체를
+# 위험 태그로 취급해 제거한다(HTML void 요소라 `_VOID_ELEMENTS`에도 이미 있음).
+_DANGEROUS_TAG_NAMES = {
+    "script", "iframe", "object", "embed", "style", "link", "meta",
+    "animate", "set", "animatemotion", "animatetransform",
+}
+# 보안 검증 발견(PR 리뷰, 4차): href/src만 스킴을 검사해 <form action="javascript:...">,
+# formaction, SVG xlink:href 같은 다른 내비게이션 속성은 그대로 통과했다 — URL을
+# 담을 수 있는 속성을 폭넓게 검사한다.
+_URL_ATTRS = {"href", "src", "action", "formaction", "xlink:href", "poster", "background"}
+_CONTROL_CHARS = re.compile(r"[\x00-\x20]+")
+# 보안 검증 발견(PR 리뷰, 4차): HTML의 "빈 요소"(void element)는 애초에 닫는 태그가
+# 존재하지 않는다. `link`/`embed`가 위험 태그 목록에 있는데 이를 몰랐더니,
+# `<link href=x>`처럼 `/`로 안 닫힌 형태가 나오면 매칭되는 `</link>`가 영원히
+# 오지 않아 skip_depth가 계속 올라간 채 남아 그 뒤의 문서 전체가 사라졌다(보안
+# 문제가 아니라 심각한 데이터 유실 회귀) — 빈 요소는 여는 태그만으로 항상
+# self-closing으로 취급한다.
+_VOID_ELEMENTS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+    # SVG 애니메이션 요소도 스펙상 빈 콘텐츠 모델(자식/닫는 태그를 진짜로
+    # 필요로 하지 않음)이라, link/embed와 같은 이유로 여기 포함해 skip_depth가
+    # 영원히 안 풀리는 것을 방지한다.
+    "animate", "set", "animatemotion", "animatetransform",
+}
+
+
+def _has_dangerous_scheme(value: str) -> bool:
+    """브라우저는 URL 스킴 판정 전에 문자 참조를 디코딩하고 탭/개행/제어문자를
+    무시한다 — HTMLParser가 attrs를 넘길 때 이미 문자 참조는 디코딩된 상태이므로,
+    여기서는 제어문자만 제거하고 대소문자 무시로 스킴 접두어를 비교한다."""
+    if value is None:
+        return False
+    normalized = _CONTROL_CHARS.sub("", value).lower()
+    return normalized.startswith(("javascript:", "vbscript:", "data:text/html"))
+
+
+class _HtmlSanitizer(HTMLParser):
+    """위험 태그(및 그 내용)를 제거하고, 남는 태그의 `on*=` 이벤트 속성과
+    `javascript:`/`vbscript:`/`data:text/html` URL 스킴을 무력화한 뒤 재직렬화한다.
+    convert_charrefs=False로 두어 일반 텍스트(코드스팬 등 이미 이스케이프된 내용
+    포함)는 원문 그대로(엔티티 표기 보존) 통과시킨다 — 디코딩 후 그대로 재출력하면
+    `&lt;`가 리터럴 `<`로 부활해 구조를 재주입할 위험이 있기 때문."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.out = []
+        self._skip_depth = 0
+
+    def _open(self, tag, attrs, self_closing):
+        tl = tag.lower()
+        self_closing = self_closing or tl in _VOID_ELEMENTS
+        if tl in _DANGEROUS_TAG_NAMES:
+            if not self_closing:
+                self._skip_depth += 1
+            return
+        if self._skip_depth:
+            return
+        cleaned = []
+        for name, value in attrs:
+            nl = name.lower()
+            if nl.startswith("on"):
+                continue
+            if nl in _URL_ATTRS and _has_dangerous_scheme(value):
+                value = "blocked:" + value
+            cleaned.append((name, value))
+        self.out.append(self._serialize(tag, cleaned, self_closing))
+
+    @staticmethod
+    def _serialize(tag, attrs, self_closing):
+        parts = [f"<{tag}"]
+        for name, value in attrs:
+            if value is None:
+                parts.append(f" {name}")
+            else:
+                parts.append(f' {name}="{html.escape(value, quote=True)}"')
+        parts.append("/>" if self_closing else ">")
+        return "".join(parts)
+
+    def handle_starttag(self, tag, attrs):
+        self._open(tag, attrs, self_closing=False)
+
+    def handle_startendtag(self, tag, attrs):
+        self._open(tag, attrs, self_closing=True)
+
+    def handle_endtag(self, tag):
+        tl = tag.lower()
+        # 빈 요소는 _open에서 애초에 skip_depth를 올리지 않으므로, 형식이
+        # 어긋난 `</link>` 같은 종료 태그가 (있을 리 없지만) 나타나더라도
+        # 무관한 depth를 잘못 줄이지 않도록 대칭적으로 무시한다.
+        if tl in _DANGEROUS_TAG_NAMES:
+            if tl not in _VOID_ELEMENTS and self._skip_depth:
+                self._skip_depth -= 1
+            return
+        if not self._skip_depth:
+            self.out.append(f"</{tag}>")
+
+    def handle_data(self, data):
+        if not self._skip_depth:
+            self.out.append(data)
+
+    def handle_entityref(self, name):
+        if not self._skip_depth:
+            self.out.append(f"&{name};")
+
+    def handle_charref(self, name):
+        if not self._skip_depth:
+            self.out.append(f"&#{name};")
+
+    def handle_comment(self, data):
+        pass  # 주석은 통째로 버린다 (조건부 주석류 트릭 방지, 내용 손실은 무해)
+
+
+def _sanitize_html_fragment(html_text: str) -> str:
+    """python-markdown은 raw HTML을 기본적으로 그대로 통과시킨다(safe_mode 없음).
+    표 셀 텍스트는 extract.py의 _escape_cell이 이미 이스케이프하지만, Step 2/3에서
+    LLM이 메시지 원문을 표가 아닌 본문 서술로 옮겨 적으면 그 경로는 보호되지
+    않는다 — 렌더링 최종 단계의 방어선(defense-in-depth)으로 실행 가능한 태그·
+    이벤트 핸들러·스크립트성 URL 스킴을 무력화한다."""
+    parser = _HtmlSanitizer()
+    parser.feed(html_text)
+    parser.close()
+    return "".join(parser.out)
 
 
 def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
@@ -43,6 +207,7 @@ def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
     # python-markdown 코어에 취소선(~~text~~)이 없어 <del>로 선치환 (HTML/PDF 공통)
     md_text = re.sub(r"~~(.+?)~~", r"<del>\1</del>", md_text)
     body = markdown.markdown(md_text, extensions=["tables", "toc", "fenced_code"])
+    body = _sanitize_html_fragment(body)
     return f"""<!DOCTYPE html>
 <html lang="{lang}">
 <head>
@@ -316,8 +481,18 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    # 보안: --name은 "reverse_prd" 같은 파일명 접두어여야 하는데, 경로 구분자나
+    # ".."가 섞여 들어오면 out_dir 밖에 파일을 쓰는 경로 조작이 될 수 있다
+    # (이 스크립트는 에이전트가 분석 대상 코드/문서 내용을 바탕으로 인자를 구성해
+    # 호출하므로, 신뢰 못 할 입력이 --name까지 흘러들 가능성을 전제로 방어한다).
+    # 디렉터리 구성요소를 제거해 순수 파일명만 남긴다.
+    safe_name = pathlib.PurePosixPath(args.name.replace("\\", "/")).name or "reverse_doc"
+    if safe_name != args.name:
+        print(f"⚠️  --name 값을 안전한 파일명으로 정규화함: {args.name!r} → {safe_name!r}",
+              file=sys.stderr)
+
     for fmt in formats:  # 같은 타임스탬프로 세트 생성 (예: _104205.pdf + _104205.html)
-        out_path = out_dir / f"{args.name}_{ts}.{fmt}"
+        out_path = out_dir / f"{safe_name}_{ts}.{fmt}"
         if fmt == "pdf":
             render_pdf(md_text, out_path, args.title, args.accent, args.lang)
         elif fmt == "docx":
