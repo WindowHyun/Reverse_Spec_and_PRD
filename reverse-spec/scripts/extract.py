@@ -183,6 +183,12 @@ def _basename_no_ext(path: str) -> str:
     return base.split(".")[0] or path
 
 
+_REGEX_PRECEDING_KEYWORDS = {
+    "return", "throw", "yield", "case", "typeof", "instanceof",
+    "in", "of", "new", "delete", "void", "do", "else",
+}
+
+
 def _looks_like_regex_start(src: str, idx: int) -> bool:
     """`/`가 나눗셈 연산자가 아니라 정규식 리터럴의 시작일 것 같으면 True.
 
@@ -200,11 +206,27 @@ def _looks_like_regex_start(src: str, idx: int) -> bool:
     방금 끝난 자리" 집합에 없어 정규식 시작으로 오판했다(§13.7 재발 증상) —
     따옴표로 끝난 뒤의 `/`는 실제 JS에서도 나눗셈/자체닫힘일 수밖에 없고
     (`"str"` 바로 뒤에 정규식이 올 문법은 없음) 정규식 시작일 수 없으므로,
-    닫는 따옴표도 "값이 방금 끝난 자리"에 포함한다."""
+    닫는 따옴표도 "값이 방금 끝난 자리"에 포함한다.
+
+    정확성 검증 발견 3차(PR 리뷰): `return /don't/.test(value)`처럼 `/` 직전이
+    `return`/`throw`/`case` 등 **키워드**로 끝나면, 그 키워드도 식별자 문자로
+    끝나서 "값이 방금 끝난 자리"로 오판돼 나눗셈으로 잘못 판정했다 — 이런
+    키워드 뒤는 항상 새 표현식이 시작하는 자리이지 값이 끝난 자리가 아니다.
+    직전 단어가 이 키워드 목록에 있으면 식별자 문자로 끝나더라도 정규식
+    시작으로 뒤집는다."""
     j = idx - 1
     while j >= 0 and src[j] in " \t\r\n":
         j -= 1
-    return not (j >= 0 and (src[j].isalnum() or src[j] in "_$)]}'\"`"))
+    if j >= 0 and (src[j].isalnum() or src[j] in "_$)]}'\"`"):
+        if src[j].isalnum() or src[j] == "_" or src[j] == "$":
+            k = j
+            while k >= 0 and (src[k].isalnum() or src[k] in "_$"):
+                k -= 1
+            word = src[k + 1:j + 1]
+            if word in _REGEX_PRECEDING_KEYWORDS:
+                return True
+        return False
+    return True
 
 
 def _skip_regex_literal(src: str, idx: int) -> int:
@@ -363,6 +385,16 @@ def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch:
         if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "*":
             end = src.find("*/", i + 2)
             i = end + 2 if end != -1 else n
+            continue
+
+        # 정확성 검증 발견(PR 리뷰): `_blank_full_line_comments`는 `//` 앞에
+        # 공백이 있을 때만 트레일링 주석으로 본다(URL 오손상 방지 목적) —
+        # `const x=1;// don't`처럼 공백 없이 바로 붙은 `//` 주석은 지워지지
+        # 않고 그대로 남아 안의 아포스트로피가 문자열 시작으로 오인됐다.
+        # 개행까지(없으면 파일 끝까지) 건너뛴다.
+        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "/":
+            nl = src.find("\n", i + 2)
+            i = nl + 1 if nl != -1 else n
             continue
 
         # 정확성 검증 발견(PR 리뷰): `/don't/.test(value)`처럼 정규식 리터럴
@@ -546,18 +578,6 @@ def extract_components(files: dict) -> list:
 
 # ── 1-C. API / 상수 / 검증·차단 규칙 ─────────────────────────
 
-def _find_matching(src: str, open_idx: int, open_ch: str, close_ch: str) -> int:
-    """open_idx의 여는 괄호에 대응하는 닫는 괄호 인덱스를 중첩까지 셈해 찾는다."""
-    depth = 0
-    for i in range(open_idx, len(src)):
-        if src[i] == open_ch:
-            depth += 1
-        elif src[i] == close_ch:
-            depth -= 1
-            if depth == 0:
-                return i
-    return -1
-
 
 _FETCH_START = re.compile(r'fetch\(\s*[\'"`]([^\'"`]+)[\'"`]')
 
@@ -612,6 +632,15 @@ def _iter_fetch_calls(src: str):
         if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "*":
             end = src.find("*/", i + 2)
             i = end + 2 if end != -1 else n
+            continue
+
+        # 정확성 검증 발견(PR 리뷰): `const x=1;// don't`처럼 `//` 앞에 공백이
+        # 없으면 `_blank_full_line_comments`가 지우지 않는다(URL 오손상 방지
+        # 목적으로 공백이 있을 때만 트레일링 주석으로 인식) — 안의 아포스트로피가
+        # 문자열 시작으로 오인되지 않도록 개행까지 건너뛴다.
+        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "/":
+            nl = src.find("\n", i + 2)
+            i = nl + 1 if nl != -1 else n
             continue
 
         # 정확성 검증 발견(PR 리뷰): `/don't/.test(value); fetch("/real")`처럼
@@ -756,6 +785,12 @@ def _find_if_return_pairs(src: str) -> list:
             end = src.find("*/", i + 2)
             i = end + 2 if end != -1 else n
             continue
+        # `//`는 공백 없이 붙으면 `_blank_full_line_comments`가 안 지운다 —
+        # 마찬가지로 개행까지 건너뛴다.
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            nl = src.find("\n", i + 2)
+            i = nl + 1 if nl != -1 else n
+            continue
         # `/don't/.test(x)`류 정규식 리터럴 안의 아포스트로피도 같은 이유로
         # 문자열 시작으로 오인될 수 있어 마찬가지로 건너뛴다.
         if (ch == "/" and i + 1 < n and src[i + 1] != "/"
@@ -788,6 +823,68 @@ def _find_if_return_pairs(src: str) -> list:
     return pairs
 
 
+_DISABLED_BRACE = re.compile(r"disabled=\{")
+
+
+def _iter_disabled_conditions(src: str):
+    """`disabled={...}` 안의 조건식(중첩 중괄호/화살표 블록/객체 포함)을
+    파일을 단 한 번만 좌→우로 순회하며 찾는다.
+
+    보안 검증 발견(PR 리뷰): 이 함수 역시 각 `disabled={` 발견마다 독립적으로
+    `_find_matching`을 불러 닫는 `}`를 찾는, 이 PR에서 다섯 번째로 드러난
+    같은 근본 원인이었다 — 닫히지 않는 `disabled={` 접두어가 반복되면 매
+    발견마다 나머지 파일 끝까지 스캔해 이차식으로 느려졌다(16KB만으로 1초
+    가까이). 처음부터 fetch/if-return 스캐너와 같은 설계(발견 지점을 모아
+    두고 단일 패스로 깊이를 스택 추적)로, 그리고 이번 라운드에서 드러난
+    문자열·블록 주석·줄 주석·정규식 리터럴 인식까지 전부 포함해서 짰다 —
+    같은 종류의 재발을 다시 기다리지 않기 위함이다."""
+    starts = {m.start() + len("disabled=") for m in _DISABLED_BRACE.finditer(src)}
+    if not starts:
+        return
+    stack: list = []
+    depth, quote, i, n = 0, None, 0, len(src)
+    while i < n:
+        ch = src[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            end = src.find("*/", i + 2)
+            i = end + 2 if end != -1 else n
+            continue
+        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+            nl = src.find("\n", i + 2)
+            i = nl + 1 if nl != -1 else n
+            continue
+        if (ch == "/" and i + 1 < n and src[i + 1] != "/"
+                and _looks_like_regex_start(src, i)):
+            i = _skip_regex_literal(src, i)
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            i += 1
+            continue
+        if ch == "{":
+            depth += 1
+            if i in starts:
+                stack.append((depth, i))
+            i += 1
+            continue
+        if ch == "}":
+            if stack and stack[-1][0] == depth:
+                _, open_idx = stack.pop()
+                yield src[open_idx + 1:i].strip()
+            depth -= 1
+            i += 1
+            continue
+        i += 1
+
+
 def extract_rules(files: dict) -> list:
     rules = []
     for fname, src in files.items():
@@ -807,13 +904,9 @@ def extract_rules(files: dict) -> list:
             rules.append({"kind": "범위 제한", "condition": f"min {m.group(2)} / max {m.group(1)}",
                           "effect": "입력값 범위 강제", "source": fname})
         # disabled={...} 의 조건은 중첩 중괄호(화살표 블록/객체)까지 포함해 잡는다
-        for m in re.finditer(r"disabled=\{", src):
-            open_idx = src.index("{", m.start())
-            close_idx = _find_matching(src, open_idx, "{", "}")
-            if close_idx != -1:
-                cond = src[open_idx + 1:close_idx].strip()
-                rules.append({"kind": "동작 차단", "condition": cond,
-                              "effect": "버튼 비활성화", "source": fname})
+        for cond in _iter_disabled_conditions(src):
+            rules.append({"kind": "동작 차단", "condition": cond,
+                          "effect": "버튼 비활성화", "source": fname})
         for m in re.finditer(r'if\s*\(!?(\w+)\)\s*\{\s*alert\("([^"]+)"\)', src):
             rules.append({"kind": "필수값", "condition": f"{m.group(1)} 조건 불충족",
                           "effect": f'알림 "{m.group(2)}" 후 중단', "source": fname})
