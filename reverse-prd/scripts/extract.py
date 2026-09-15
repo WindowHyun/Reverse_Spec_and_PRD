@@ -280,6 +280,19 @@ def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch:
             i += 1
             continue
 
+        # 정확성 검증 발견(PR 리뷰): JSX 프래그먼트 단축 문법 `<>...</>` 의 여는
+        # `<>`는 다음 문자가 식별자도 `/`도 아니라(바로 `>`) 아래의 일반 태그
+        # 감지 조건에 안 걸려, 내용이 계속 이전 mode(대개 "code")에 남아 그 안의
+        # 아포스트로피 등을 문자열 시작으로 오인했다(§13.7과 같은 증상 재발).
+        # 프래그먼트는 속성이 없어 속성 목록 스캔이 필요 없으므로, 만나는 즉시
+        # "text"로 전환한다. (닫는 `</>`는 `/`로 시작하므로 아래 일반 태그 감지
+        # 조건에서 이미 정상 처리된다.)
+        if ch == "<" and i + 1 < n and src[i + 1] == ">":
+            text_stack.append(mode)
+            mode = "text"
+            i += 2
+            continue
+
         # `<`가 비교/제네릭 연산자로 오인될 수 있는 모호성은 "code" 맥락(표현식
         # 안)에서만 존재한다 — "text" 맥락(JSX 자식)에서는 `<` 뒤에 문자/`/`가
         # 오면 항상 자식 태그이거나 닫는 태그이므로 무조건 태그 시작으로 본다.
@@ -429,18 +442,43 @@ def _find_matching_paren(src: str, open_idx: int) -> int:
     return _find_matching(src, open_idx, "(", ")")
 
 
+_FETCH_START = re.compile(r'fetch\(\s*[\'"`]([^\'"`]+)[\'"`]')
+
+
+def _iter_fetch_calls(src: str):
+    """`fetch(...)` 호출을 파일을 단 한 번만 좌→우로 순회하며 찾는다.
+
+    보안 검증 발견(PR 리뷰): 이전 구현은 `re.finditer`로 찾은 각 `fetch("x"`
+    발견마다 독립적으로 `_find_matching_paren`을 호출해 닫는 `)`를 찾았는데,
+    이는 라우트 추출기가 §13.4에서 겪은 것과 같은 근본 원인이다 — 닫히지 않는
+    `fetch("x" ` 접두어가 반복되면 매 발견마다 나머지 파일 끝까지 스캔해
+    이차식으로 느려졌다(20KB 입력만으로 1초+ 실측). §13.4/13.5와 같은 패턴으로
+    단일 패스로 교체: 발견마다 이미 지나온 구간은 다시 스캔하지 않고, 닫는
+    `)`를 못 찾으면(적대적으로 깨진 코드) 그 지점에서 전체 탐색을 즉시
+    종료한다(재시도 스캔 없음 — 실제 동작하는 코드는 괄호가 항상 맞으므로
+    정상 파일의 추출에는 영향이 없다)."""
+    pos, n = 0, len(src)
+    while pos < n:
+        m = _FETCH_START.search(src, pos)
+        if not m:
+            return
+        paren_idx = src.index("(", m.start())
+        close_idx = _find_matching_paren(src, paren_idx)
+        if close_idx == -1:
+            return
+        yield m.group(1), src[paren_idx:close_idx + 1]
+        pos = close_idx + 1
+
+
 def extract_api_calls(files: dict) -> list:
     calls = []
     for fname, src in files.items():
-        for m in re.finditer(r'fetch\(\s*[\'"`]([^\'"`]+)[\'"`]', src):
-            paren_idx = src.index("(", m.start())
-            close_idx = _find_matching_paren(src, paren_idx)
-            call_text = src[paren_idx:close_idx + 1] if close_idx != -1 else m.group(0)
+        for endpoint, call_text in _iter_fetch_calls(src):
             method = "GET"
             m_method = re.search(r'method:\s*[\'"](\w+)[\'"]', call_text)
             if m_method:
                 method = m_method.group(1)
-            calls.append({"endpoint": m.group(1), "method": method, "source": fname})
+            calls.append({"endpoint": endpoint, "method": method, "source": fname})
         # axios.get(...) 직접 호출 + `const api = axios.create(); api.get("/x")` 처럼
         # 인스턴스를 통한 호출(정확성 검증 발견 — baseURL/인터셉터 설정 시 표준 패턴)도
         # 첫 인자가 경로/URL 문자열인 .메서드( 호출로 포착한다.
@@ -841,7 +879,17 @@ def main() -> int:
 
     root = pathlib.Path(args.target)
     if root.is_file():
-        files = {root.name: root.read_text(encoding="utf-8")}
+        # 보안 검증 발견(PR 리뷰): 대상이 파일 하나로 직접 지정되면 이 분기가
+        # read_sources()를 완전히 우회해, read_sources() 안에 있는
+        # MAX_FILE_BYTES 크기 상한이 전혀 적용되지 않았다 — 거대한 적대적
+        # 파일을 직접 지정하면 상한 없이 모든 추출기에 그대로 들어갔다.
+        # read_sources()와 동일한 상한을 여기서도 적용한다.
+        if root.stat().st_size > MAX_FILE_BYTES:
+            print(f"⚠️  건너뜀(파일 크기 {root.stat().st_size:,}B > 상한): {root}",
+                  file=sys.stderr)
+            files = {}
+        else:
+            files = {root.name: root.read_text(encoding="utf-8")}
         root = root.parent
     else:
         files = read_sources(root)
