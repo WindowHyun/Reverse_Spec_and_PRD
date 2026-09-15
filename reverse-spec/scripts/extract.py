@@ -207,6 +207,24 @@ def _looks_like_operator_lt(src: str, idx: int) -> bool:
     return j >= 0 and (src[j].isalnum() or src[j] in "_$)]}")
 
 
+def _looks_like_generic_params(src: str, idx: int) -> bool:
+    """`<`가 JSX 태그 시작이 아니라 TSX 제네릭 매개변수 목록(`<T,>(x: T) => x`
+    같은, `.tsx`에서 JSX와 제네릭 화살표 함수를 구분하려고 일부러 트레일링
+    콤마를 붙이는 관용구)일 것 같으면 True.
+
+    정확성 검증 발견(PR 리뷰): `fn={<T,>(x: T) => x}`에서 `<T,`는 `_looks_like_operator_lt`
+    기준(직전이 `{`)으로는 "연산자 아님 = 태그"로 판정돼, `<T,>`를 여는 태그로
+    오인하고 그 `>`를 태그 종료로 소비해 뒤따르는 `(x: T) => x`가 JSX 텍스트로
+    잘못 처리됐다(§13.9와 같은 근본 문제의 또 다른 얼굴 — `<`의 모호성은
+    비교연산자뿐 아니라 제네릭에도 있다). JSX 태그 이름 뒤에는 항상 공백/`>`/
+    `/`가 오고 콤마가 바로 오는 경우는 없으므로(그러면 문법 오류), 식별자 뒤
+    첫 비식별자 문자가 콤마면 제네릭 매개변수 목록으로 본다."""
+    j = idx + 1
+    while j < len(src) and (src[j].isalnum() or src[j] in "_$"):
+        j += 1
+    return j < len(src) and src[j] == ","
+
+
 def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch: str) -> int:
     """`_find_matching`과 같되, "JSX 텍스트"와 "코드"(태그 속성/표현식) 맥락을
     구분해 코드 맥락의 문자열 리터럴 안 여는/닫는 문자는 깊이 계산에서
@@ -293,14 +311,16 @@ def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch:
             i += 2
             continue
 
-        # `<`가 비교/제네릭 연산자로 오인될 수 있는 모호성은 "code" 맥락(표현식
-        # 안)에서만 존재한다 — "text" 맥락(JSX 자식)에서는 `<` 뒤에 문자/`/`가
-        # 오면 항상 자식 태그이거나 닫는 태그이므로 무조건 태그 시작으로 본다.
-        # (자체 재검토 발견: 처음엔 맥락 구분 없이 이 검사를 걸었다가
-        # `<div>Don't stop</div>`의 `</div>`가 "stop" 뒤(식별자 문자 뒤)에
-        # 온다는 이유로 태그가 아니라고 오판해 §13.7 회귀가 재발했었다.)
+        # `<`가 비교연산자/TSX 제네릭으로 오인될 수 있는 모호성은 "code" 맥락
+        # (표현식 안)에서만 존재한다 — "text" 맥락(JSX 자식)에서는 `<` 뒤에
+        # 문자/`/`가 오면 항상 자식 태그이거나 닫는 태그이므로 무조건 태그
+        # 시작으로 본다. (자체 재검토 발견: 처음엔 맥락 구분 없이 비교연산자
+        # 검사를 걸었다가 `<div>Don't stop</div>`의 `</div>`가 "stop"(식별자
+        # 문자) 뒤에 온다는 이유로 태그가 아니라고 오판해 §13.7 회귀가
+        # 재발했었다.)
         if (ch == "<" and i + 1 < n and (src[i + 1].isalpha() or src[i + 1] == "/")
-                and not (mode == "code" and _looks_like_operator_lt(src, i))):
+                and not (mode == "code" and (_looks_like_operator_lt(src, i)
+                                              or _looks_like_generic_params(src, i)))):
             pending_tags.append((depth, src[i + 1] == "/", mode))
             mode = "code"
             i += 1
@@ -442,6 +462,39 @@ def _find_matching_paren(src: str, open_idx: int) -> int:
     return _find_matching(src, open_idx, "(", ")")
 
 
+def _find_matching_paren_skip_strings(src: str, open_idx: int) -> int:
+    """`_find_matching_paren`과 같되, 문자열/템플릿 리터럴 안의 괄호는 깊이
+    계산에서 제외한다(백슬래시 이스케이프 존중).
+
+    정확성 검증 발견(PR 리뷰): fetch 인자 문자열 안에 짝이 안 맞는 괄호가
+    있으면(예: JSON 바디 값 `{body: "("}`) 순수 괄호 카운팅이 깊이를 잘못
+    계산해 EOF까지 스캔하며 -1을 반환했고, `_iter_fetch_calls`의 "못 찾으면
+    전체 탐색 종료" 규칙 때문에 그 뒤에 오는 멀쩡한 `fetch(...)` 호출까지
+    전부 누락됐다(이전의 독립 정규식 반복 방식은 한 매치가 이상해도 나머지는
+    계속 찾았는데, 성능을 위해 단일 패스로 바꾸며 이 견고함을 실수로
+    잃었다). fetch 인자는 JSX가 아니라 순수 JS 표현식이라 "텍스트 맥락"
+    구분이 필요 없어 라우트 스캐너보다 단순한 버전으로 충분하다."""
+    depth, quote, i, n = 0, None, open_idx, len(src)
+    while i < n:
+        ch = src[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"', "`"):
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
 _FETCH_START = re.compile(r'fetch\(\s*[\'"`]([^\'"`]+)[\'"`]')
 
 
@@ -453,17 +506,17 @@ def _iter_fetch_calls(src: str):
     이는 라우트 추출기가 §13.4에서 겪은 것과 같은 근본 원인이다 — 닫히지 않는
     `fetch("x" ` 접두어가 반복되면 매 발견마다 나머지 파일 끝까지 스캔해
     이차식으로 느려졌다(20KB 입력만으로 1초+ 실측). §13.4/13.5와 같은 패턴으로
-    단일 패스로 교체: 발견마다 이미 지나온 구간은 다시 스캔하지 않고, 닫는
-    `)`를 못 찾으면(적대적으로 깨진 코드) 그 지점에서 전체 탐색을 즉시
-    종료한다(재시도 스캔 없음 — 실제 동작하는 코드는 괄호가 항상 맞으므로
-    정상 파일의 추출에는 영향이 없다)."""
+    단일 패스로 교체: 발견마다 이미 지나온 구간은 다시 스캔하지 않는다.
+    문자열 안 괄호는 `_find_matching_paren_skip_strings`가 걸러내므로, 닫는
+    `)`를 못 찾는 경우는 정말로 괄호가 깨진(적대적이거나 손상된) 입력뿐이라고
+    보고 그 지점에서 전체 탐색을 즉시 종료한다(재시도 스캔 없음)."""
     pos, n = 0, len(src)
     while pos < n:
         m = _FETCH_START.search(src, pos)
         if not m:
             return
         paren_idx = src.index("(", m.start())
-        close_idx = _find_matching_paren(src, paren_idx)
+        close_idx = _find_matching_paren_skip_strings(src, paren_idx)
         if close_idx == -1:
             return
         yield m.group(1), src[paren_idx:close_idx + 1]
