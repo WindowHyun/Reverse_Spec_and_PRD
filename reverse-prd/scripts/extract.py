@@ -672,9 +672,18 @@ def _iter_fetch_calls(src: str):
     # 맥락(괄호/따옴표 정상 추적)으로 들어가야 한다. `{`/`}`는 라우트
     # 스캐너와 같은 스택 방식(여는 시점의 mode를 저장했다가 닫는 시점에
     # 복원)으로 다뤄, 보간 안의 일반 객체 리터럴 `{}`과도 구분한다.
+    #
+    # 정확성 검증 발견(PR 리뷰): `<p>Don't stop</p><script>fetch("/real")</script>`
+    # 처럼 이 스캐너가 파일 전체를 훑다 마주치는 평범한 마크업 텍스트 안의
+    # 아포스트로피도 코드 맥락 문자열 시작으로 오인해 그 뒤 정상 fetch 호출을
+    # 놓쳤다 — 라우트 스캐너의 태그 감지/모드 전환 로직을 포팅해 `mode`에
+    # "text"를 추가했다. 태그 자신의 종료 `>`를 찾는 목표 깊이는 이미 있던
+    # `brace_modes` 스택 길이를 재사용한다.
     stack: list = []         # [(그 호출의 '('을 지날 때의 깊이, endpoint, '(' 위치), ...]
-    brace_modes: list = []   # `{`를 열 때 mode를 저장, 대응 `}`에서 복원 (템플릿 보간용)
-    mode = "code"            # "code" | "template"
+    brace_modes: list = []   # `{`를 열 때 mode를 저장, 대응 `}`에서 복원 (템플릿 보간/JSX 표현식 공용)
+    text_stack: list = []    # 여는 태그가 "text"로 들어갈 때 복귀용 mode 저장
+    pending_tags: list = []  # [(태그 시작 시점의 brace_modes 깊이, 닫는태그 여부, 시작 전 mode), ...]
+    mode = "code"            # "code" | "template" | "text"
     depth, i, n = 0, 0, len(src)
     while i < n:
         ch = src[i]
@@ -735,21 +744,71 @@ def _iter_fetch_calls(src: str):
             i += 1
             continue
 
+        # JSX 프래그먼트 `<>` — 속성이 없어 즉시 "text"로 전환.
+        if ch == "<" and i + 1 < n and src[i + 1] == ">":
+            text_stack.append(mode)
+            mode = "text"
+            i += 2
+            continue
+        # 여는/닫는 태그 시작. "text" 맥락에서는 `<`+식별자/`/`가 무조건 태그이고,
+        # "code" 맥락에서는 비교연산자/TSX 제네릭이 아닐 때만 태그로 본다.
+        # 태그 이름도 같이 기록해둔다 — `<script>`는 자식이 JSX 텍스트가 아니라
+        # 그대로 JS 코드이므로, 여는 태그 처리에서 "text"로 전환하지 않기 위함
+        # (아래 참고).
+        if (ch == "<" and i + 1 < n and (src[i + 1].isalpha() or src[i + 1] == "/")
+                and not (mode == "code" and (_looks_like_operator_lt(src, i)
+                                              or _looks_like_generic_params(src, i)))):
+            is_closing = src[i + 1] == "/"
+            name_start = i + (2 if is_closing else 1)
+            k = name_start
+            while k < n and (src[k].isalnum() or src[k] in "_$.-:"):
+                k += 1
+            tag_name = src[name_start:k]
+            pending_tags.append((len(brace_modes), is_closing, mode, tag_name))
+            mode = "code"
+            i += 2 if is_closing else 1
+            continue
+        if (mode == "code" and ch == ">" and pending_tags
+                and pending_tags[-1][0] == len(brace_modes)):
+            _, is_closing, mode_before, tag_name = pending_tags.pop()
+            self_closing = i > 0 and src[i - 1] == "/"
+            # 정확성 검증 발견(PR 리뷰): `<p>Don't stop</p><script>fetch("/real")</script>`
+            # 처럼 `<script>` 태그의 자식은 일반 JSX 태그와 달리 "text"가
+            # 아니라 순수 JS 코드다 — 일반 태그처럼 "text"로 전환하면 그
+            # 안의 fetch 호출이 문자열/괄호 추적 없이 그냥 텍스트로 지나가
+            # 놓친다. `<script>`(대소문자 무관)만 "code"로 유지한다.
+            if is_closing:
+                mode = text_stack.pop() if text_stack else "code"
+            elif self_closing:
+                mode = mode_before
+            elif tag_name.lower() == "script":
+                text_stack.append(mode_before)
+                mode = "code"
+            else:
+                text_stack.append(mode_before)
+                mode = "text"
+            i += 1
+            continue
+
         if ch == "{":
-            brace_modes.append("code")
+            brace_modes.append(mode)
+            mode = "code"
             i += 1
             continue
         if ch == "}":
             mode = brace_modes.pop() if brace_modes else "code"
             i += 1
             continue
-        if ch == "(":
+        # JSX 텍스트 안의 리터럴 `(`/`)`는 실제 코드 괄호가 아니므로 "code"
+        # 맥락에서만 깊이로 센다 — 그렇지 않으면 텍스트 속 괄호가 fetch 호출
+        # 깊이 계산을 어긋나게 할 수 있다.
+        if mode == "code" and ch == "(":
             depth += 1
             if i in starts:
                 stack.append((depth, starts[i], i))
             i += 1
             continue
-        if ch == ")":
+        if mode == "code" and ch == ")":
             if stack and stack[-1][0] == depth:
                 _, endpoint, paren_idx = stack.pop()
                 yield endpoint, src[paren_idx:i + 1]
@@ -824,14 +883,27 @@ def _find_if_return_pairs(src: str) -> list:
     적용했다: `mode`("code"/"template")로 백틱 문자열 안팎을 구분하고,
     `${`를 만나면 대응하는 `}`까지 `brace_modes` 스택으로 code 맥락에
     되돌아가(보간 안의 if-return도 정상 스캔), 그 `}`에서 template 모드로
-    복원한다. 홑/쌍따옴표는 보간이 없으므로 기존처럼 단순 플래그로 다룬다."""
+    복원한다. 홑/쌍따옴표는 보간이 없으므로 기존처럼 단순 플래그로 다룬다.
+
+    정확성 검증 발견(PR 리뷰): 이 스캐너는 파일 전체를 훑으므로, `if (`보다
+    앞에 나오는 평범한 JSX 텍스트 안의 아포스트로피(`const A=()=> <p>Don't
+    stop</p>; function f(x){if (x) return "bad";}`)도 코드 맥락 문자열
+    시작으로 오인해 이후 전체 파일을 잘못 스캔했다 — 라우트 스캐너가
+    `_find_matching_skip_strings`에서 이미 검증한 태그 감지/모드 전환
+    로직(`<Tag ...>`↔JSX 자식 텍스트, `_looks_like_operator_lt`/
+    `_looks_like_generic_params`로 비교연산자·제네릭과 구분)을 그대로
+    포팅해 `mode`에 "text"를 추가했다. 태그 자신의 종료 `>`를 찾는 목표
+    깊이는 이미 있던 `brace_modes` 스택 길이를 그대로 재사용한다(템플릿
+    보간이든 JSX 표현식이든 `{`/`}`는 똑같이 그 스택에 쌓이므로)."""
     starts = {src.index("(", m.start()) for m in _IF_PAREN.finditer(src)}
     if not starts:
         return []
     pairs = []
     stack: list = []  # [(그 if의 '('을 지날 때의 깊이, '(' 위치), ...]
-    brace_modes: list = []  # `{`를 열 때 mode를 저장, 대응 `}`에서 복원 (템플릿 보간용)
-    mode = "code"            # "code" | "template"
+    brace_modes: list = []  # `{`를 열 때 mode를 저장, 대응 `}`에서 복원 (템플릿 보간/JSX 표현식 공용)
+    text_stack: list = []   # 여는 태그가 "text"로 들어갈 때 복귀용 mode 저장
+    pending_tags: list = []  # [(태그 시작 시점의 brace_modes 깊이, 닫는태그 여부, 시작 전 mode), ...]
+    mode = "code"            # "code" | "template" | "text"
     depth, quote, i, n = 0, None, 0, len(src)
     while i < n:
         ch = src[i]
@@ -885,21 +957,56 @@ def _find_if_return_pairs(src: str) -> list:
                 continue
             i += 1
             continue
+
+        # JSX 프래그먼트 `<>` — 속성이 없어 즉시 "text"로 전환.
+        if ch == "<" and i + 1 < n and src[i + 1] == ">":
+            text_stack.append(mode)
+            mode = "text"
+            i += 2
+            continue
+        # 여는/닫는 태그 시작. "text" 맥락에서는 `<`+식별자/`/`가 무조건 태그이고,
+        # "code" 맥락에서는 비교연산자/TSX 제네릭이 아닐 때만 태그로 본다.
+        if (ch == "<" and i + 1 < n and (src[i + 1].isalpha() or src[i + 1] == "/")
+                and not (mode == "code" and (_looks_like_operator_lt(src, i)
+                                              or _looks_like_generic_params(src, i)))):
+            is_closing = src[i + 1] == "/"
+            pending_tags.append((len(brace_modes), is_closing, mode))
+            mode = "code"
+            i += 2 if is_closing else 1
+            continue
+        if (mode == "code" and ch == ">" and pending_tags
+                and pending_tags[-1][0] == len(brace_modes)):
+            _, is_closing, mode_before = pending_tags.pop()
+            self_closing = i > 0 and src[i - 1] == "/"
+            if is_closing:
+                mode = text_stack.pop() if text_stack else "code"
+            elif self_closing:
+                mode = mode_before
+            else:
+                text_stack.append(mode_before)
+                mode = "text"
+            i += 1
+            continue
+
         if ch == "{":
-            brace_modes.append("code")
+            brace_modes.append(mode)
+            mode = "code"
             i += 1
             continue
         if ch == "}":
             mode = brace_modes.pop() if brace_modes else "code"
             i += 1
             continue
-        if ch == "(":
+        # JSX 텍스트 안의 리터럴 `(`/`)`(예: `<p>(옵션)</p>`)는 실제 코드 괄호가
+        # 아니므로 "code" 맥락에서만 깊이로 센다 — 아니면 텍스트 속 괄호가
+        # if-조건 깊이 계산을 어긋나게 할 수 있다.
+        if mode == "code" and ch == "(":
             depth += 1
             if i in starts:
                 stack.append((depth, i))
             i += 1
             continue
-        if ch == ")":
+        if mode == "code" and ch == ")":
             if stack and stack[-1][0] == depth:
                 _, paren_idx = stack.pop()
                 condition = src[paren_idx + 1:i].strip()
@@ -929,11 +1036,24 @@ def _iter_disabled_conditions(src: str):
     가까이). 처음부터 fetch/if-return 스캐너와 같은 설계(발견 지점을 모아
     두고 단일 패스로 깊이를 스택 추적)로, 그리고 이번 라운드에서 드러난
     문자열·블록 주석·줄 주석·정규식 리터럴 인식까지 전부 포함해서 짰다 —
-    같은 종류의 재발을 다시 기다리지 않기 위함이다."""
+    같은 종류의 재발을 다시 기다리지 않기 위함이다.
+
+    정확성 검증 발견(PR 리뷰): 이 스캐너도 파일 전체를 훑으므로,
+    `disabled={`보다 앞에 나오는 평범한 JSX 텍스트 안의 아포스트로피
+    (`<><p>Don't stop</p><button disabled={loading}>Go</button></>`)를
+    문자열 시작으로 오인해 그 뒤 정상 `disabled={`를 놓쳤다 — if-return/fetch
+    스캐너와 같은 태그 감지/모드 전환 로직을 포팅해 `mode`에 "text"를
+    추가했다. 태그 자신의 종료 `>`를 찾는 목표 깊이는 이 스캐너가 이미
+    갖고 있던 `{`/`}` 깊이 카운터(`depth`)를 그대로 재사용한다(모든
+    `{`/`}`를 세는 카운터이므로 JSX 표현식 깊이와 정확히 일치)."""
     starts = {m.start() + len("disabled=") for m in _DISABLED_BRACE.finditer(src)}
     if not starts:
         return
     stack: list = []
+    brace_modes: list = []   # `{`를 열 때 mode를 저장, 대응 `}`에서 복원
+    text_stack: list = []    # 여는 태그가 "text"로 들어갈 때 복귀용 mode 저장
+    pending_tags: list = []  # [(태그 시작 시점의 depth, 닫는태그 여부, 시작 전 mode), ...]
+    mode = "code"
     depth, quote, i, n = 0, None, 0, len(src)
     while i < n:
         ch = src[i]
@@ -945,24 +1065,57 @@ def _iter_disabled_conditions(src: str):
                 quote = None
             i += 1
             continue
-        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "*":
             end = src.find("*/", i + 2)
             i = end + 2 if end != -1 else n
             continue
-        if ch == "/" and i + 1 < n and src[i + 1] == "/":
+        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "/":
             nl = src.find("\n", i + 2)
             i = nl + 1 if nl != -1 else n
             continue
-        if (ch == "/" and i + 1 < n and src[i + 1] != "/"
+        if (mode == "code" and ch == "/" and i + 1 < n and src[i + 1] != "/"
                 and _looks_like_regex_start(src, i)):
             i = _skip_regex_literal(src, i)
             continue
-        if ch in ("'", '"', "`"):
+        if mode == "code" and ch in ("'", '"', "`"):
             quote = ch
             i += 1
             continue
+
+        # JSX 프래그먼트 `<>` — 속성이 없어 즉시 "text"로 전환.
+        if ch == "<" and i + 1 < n and src[i + 1] == ">":
+            text_stack.append(mode)
+            mode = "text"
+            i += 2
+            continue
+        # 여는/닫는 태그 시작. "text" 맥락에서는 `<`+식별자/`/`가 무조건 태그이고,
+        # "code" 맥락에서는 비교연산자/TSX 제네릭이 아닐 때만 태그로 본다.
+        if (ch == "<" and i + 1 < n and (src[i + 1].isalpha() or src[i + 1] == "/")
+                and not (mode == "code" and (_looks_like_operator_lt(src, i)
+                                              or _looks_like_generic_params(src, i)))):
+            is_closing = src[i + 1] == "/"
+            pending_tags.append((depth, is_closing, mode))
+            mode = "code"
+            i += 2 if is_closing else 1
+            continue
+        if (mode == "code" and ch == ">" and pending_tags
+                and pending_tags[-1][0] == depth):
+            _, is_closing, mode_before = pending_tags.pop()
+            self_closing = i > 0 and src[i - 1] == "/"
+            if is_closing:
+                mode = text_stack.pop() if text_stack else "code"
+            elif self_closing:
+                mode = mode_before
+            else:
+                text_stack.append(mode_before)
+                mode = "text"
+            i += 1
+            continue
+
         if ch == "{":
             depth += 1
+            brace_modes.append(mode)
+            mode = "code"
             if i in starts:
                 stack.append((depth, i))
             i += 1
@@ -972,6 +1125,7 @@ def _iter_disabled_conditions(src: str):
                 _, open_idx = stack.pop()
                 yield src[open_idx + 1:i].strip()
             depth -= 1
+            mode = brace_modes.pop() if brace_modes else "code"
             i += 1
             continue
         i += 1
