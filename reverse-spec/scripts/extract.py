@@ -184,47 +184,97 @@ def _basename_no_ext(path: str) -> str:
 
 
 def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch: str) -> int:
-    """`_find_matching`과 같되, JSX 속성값(`attr="..."`/`attr='...'`) 문자열
-    리터럴 안의 여는/닫는 문자는 깊이 계산에서 제외한다(백슬래시 이스케이프도
-    건너뜀).
+    """`_find_matching`과 같되, "JSX 텍스트"와 "코드"(태그 속성/표현식) 맥락을
+    구분해 코드 맥락의 문자열 리터럴 안 여는/닫는 문자는 깊이 계산에서
+    제외한다.
 
-    정확성 검증 발견 1차(PR 리뷰): `_iter_jsx_route_blocks`가 순수 `_find_matching`을
-    쓰면, JSX 속성값 안의 리터럴 `{`(예: `label="{"`)까지 깊이로 세어버려 실제
-    닫는 `}`를 지나쳐 스캔이 어긋나고, 심하면 그 뒤에 오는 멀쩡한 라우트까지
-    스캔이 조기 종료로 통째로 사라졌다.
-    정확성 검증 발견 2차(PR 리뷰): 그래서 따옴표를 무조건 문자열 구분자로 보게
-    고쳤더니, 이번엔 `<div>Don't stop</div>` 같은 JSX **텍스트** 안의 아포스트로피
-    까지 문자열 시작으로 오인해 같은 "스캔 조기 종료" 증상이 재발했다 — JSX
-    텍스트는 JS 문자열이 아니라 따옴표에 이스케이프/구분자 의미가 없다.
-    두 사례를 모두 만족하려면 "어디서든 나온 따옴표"가 아니라 "`attr=` 뒤에
-    바로(공백 허용) 오는 따옴표만" 문자열 시작으로 봐야 한다 — JSX 속성 할당의
-    실제 문법과 일치하는 신호라 오탐이 훨씬 적다. (여전히 문자 스캔 기반이라
-    템플릿 리터럴의 `${...}`, 정규식 리터럴, `=` 없이 오는 JS 문자열 리터럴
-    (예: 단순 `return 'x'`) 등 더 복잡한 경우까지 완벽히 다루진 않는다 —
-    reference.md 1-I의 알려진 한계와 같은 성격이며, 단일 패스 선형 스캔이라는
-    성질은 그대로 유지된다.)"""
-    depth, quote, i, n = 0, None, open_idx, len(src)
+    이 함수는 세 차례에 걸친 PR 리뷰 재검증에서 좁은 휴리스틱을 하나씩 늘려가며
+    번번이 반대쪽 사례에서 다시 터졌다:
+      1차: 순수 괄호 카운팅 → JSX 속성값 안 리터럴 `{`(`label="{"`)에 걸려
+           닫는 `}`를 못 찾음.
+      2차: "따옴표는 무조건 문자열" → JSX **텍스트** 안 아포스트로피
+           (`Don't stop`)까지 문자열 시작으로 오인.
+      3차: "`=` 뒤에 오는 따옴표만 문자열" → `attr={cond ? "{" : "x"}`처럼
+           `=` 없이 표현식 안에 오는 문자열(삼항 분기 등)을 놓침.
+    세 사례 모두 "따옴표가 코드 맥락(태그 속성 목록/표현식 내부)에 있는지, JSX
+    텍스트 맥락에 있는지"를 구분하지 못한 게 근본 원인이었다 — 위치(직전 문자가
+    `=`인지)가 아니라 **맥락**이 기준이어야 한다. 그래서 이번엔 `<Tag ...>`
+    (코드: 속성 목록, 따옴표=문자열) ↔ JSX 자식 텍스트(따옴표=그냥 글자) 전환을
+    실제로 추적하는 작은 상태기계로 다시 짰다:
+
+    - `mode`: "code"(따옴표/백틱=문자열 구분자) 또는 "text"(따옴표는 글자).
+      시작은 "code"(`element={` 바로 다음이 표현식이므로).
+    - `{`/`}`: 어느 모드에서든 항상 깊이로 세고(JSX 규격상 이스케이프 없는
+      `{`는 텍스트에서도 언제나 표현식 시작), `{`를 열 때 현재 mode를 스택에
+      저장했다가 대응하는 `}`에서 복원한다 — 이게 바로 목표 깊이(0)를 찾는
+      기준이다.
+    - `<식별자` 또는 `</`: 태그 시작 — 그 태그 자신의 종료 `>`를 찾을 때까지
+      (같은 깊이에서) mode를 "code"로 둬 속성 목록을 정상 처리한다. 종료 `>`를
+      만나면: 닫는 태그면 `text_stack`을 복원(부모 텍스트로 복귀), 자체 닫힘
+      (`/>`)이면 태그 시작 전 mode로 복귀, 여는 태그(자식 있음)면 "text"로
+      전환하고 복귀용 mode를 `text_stack`에 쌓아둔다.
+    - 그 외 문자는 현재 mode에서 그대로 지나간다(코드 맥락 문자열/백틱만
+      건너뛰고, 텍스트 맥락에서는 아무 글자나 그냥 텍스트).
+
+    여전히 문자 스캔 기반 근사치라 정규식 리터럴, JS 비교연산자 `<`/`>`가
+    표현식 안에서 오탐될 가능성 등 더 복잡한 경우까지 완벽히 다루진 않는다 —
+    reference.md 1-I의 알려진 한계와 같은 성격이지만, 실제 라우트 JSX에서
+    나올 법한 "속성값 문자열 vs 텍스트 vs 표현식 안 문자열"은 모두 다룬다.
+    여전히 단일 좌→우 패스(문자당 O(1) 상태)라 이차식 비용 문제는 재발하지
+    않는다."""
+    depth, mode, i, n = 0, "code", open_idx, len(src)
+    brace_modes: list = []   # `{`를 열 때 mode를 저장, 대응 `}`에서 복원
+    text_stack: list = []    # 여는 태그가 "text"로 들어갈 때 복귀용 mode를 저장
+    pending_tags: list = []  # [(태그 시작 시점의 depth, 닫는태그 여부, 시작 전 mode), ...]
+
+    def _skip_delimited(j: int, delim: str) -> int:
+        """j(따옴표/백틱 다음)부터 이스케이프를 존중하며 delim과 같은 문자를 찾는다."""
+        while j < n and src[j] != delim:
+            j += 2 if src[j] == "\\" else 1
+        return j + 1  # 닫는 문자 다음(또는 EOF) 위치
+
     while i < n:
         ch = src[i]
-        if quote:
-            if ch == "\\":
-                i += 2
-                continue
-            if ch == quote:
-                quote = None
-        elif ch in ("'", '"'):
-            j = i - 1
-            while j >= 0 and src[j] in " \t\r\n":
-                j -= 1
-            if j >= 0 and src[j] == "=":
-                quote = ch
-            # else: JSX 텍스트 안의 따옴표/아포스트로피 — 구분자로 보지 않는다.
-        elif ch == open_ch:
+
+        if mode == "code" and ch in ("'", '"', "`"):
+            i = _skip_delimited(i + 1, ch)
+            continue
+
+        if ch == open_ch:
+            brace_modes.append(mode)
+            mode = "code"
             depth += 1
-        elif ch == close_ch:
-            depth -= 1
-            if depth == 0:
-                return i
+            i += 1
+            continue
+
+        if ch == close_ch:
+            if mode == "code":
+                depth -= 1
+                mode = brace_modes.pop() if brace_modes else "code"
+                if depth == 0:
+                    return i
+            i += 1
+            continue
+
+        if ch == "<" and i + 1 < n and (src[i + 1].isalpha() or src[i + 1] == "/"):
+            pending_tags.append((depth, src[i + 1] == "/", mode))
+            mode = "code"
+            i += 1
+            continue
+
+        if mode == "code" and ch == ">" and pending_tags and pending_tags[-1][0] == depth:
+            _, is_closing, mode_before = pending_tags.pop()
+            self_closing = i > 0 and src[i - 1] == "/"
+            if is_closing:
+                mode = text_stack.pop() if text_stack else "code"
+            elif self_closing:
+                mode = mode_before
+            else:
+                text_stack.append(mode_before)
+                mode = "text"
+            i += 1
+            continue
+
         i += 1
     return -1
 
