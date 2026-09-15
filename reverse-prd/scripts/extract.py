@@ -184,17 +184,25 @@ def _basename_no_ext(path: str) -> str:
 
 
 def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch: str) -> int:
-    """`_find_matching`과 같되, 큰따옴표/작은따옴표 문자열 리터럴 안의 여는/닫는
-    문자는 깊이 계산에서 제외한다(백슬래시 이스케이프도 건너뜀).
+    """`_find_matching`과 같되, JSX 속성값(`attr="..."`/`attr='...'`) 문자열
+    리터럴 안의 여는/닫는 문자는 깊이 계산에서 제외한다(백슬래시 이스케이프도
+    건너뜀).
 
-    정확성 검증 발견(PR 리뷰): `_iter_jsx_route_blocks`가 순수 `_find_matching`을
+    정확성 검증 발견 1차(PR 리뷰): `_iter_jsx_route_blocks`가 순수 `_find_matching`을
     쓰면, JSX 속성값 안의 리터럴 `{`(예: `label="{"`)까지 깊이로 세어버려 실제
     닫는 `}`를 지나쳐 스캔이 어긋나고, 심하면 그 뒤에 오는 멀쩡한 라우트까지
-    스캔이 조기 종료로 통째로 사라졌다. 문자열 리터럴 안은 건너뛰도록 해 이
-    구체적인 사례(속성값 안의 리터럴 중괄호)를 바로잡는다. (여전히 문자
-    스캔 기반이라 템플릿 리터럴의 `${...}`, 정규식 리터럴 등 더 복잡한 경우까지
-    완벽히 다루진 않는다 — reference.md 1-I의 알려진 한계와 같은 성격이며,
-    단일 패스 선형 스캔이라는 성질은 그대로 유지된다.)"""
+    스캔이 조기 종료로 통째로 사라졌다.
+    정확성 검증 발견 2차(PR 리뷰): 그래서 따옴표를 무조건 문자열 구분자로 보게
+    고쳤더니, 이번엔 `<div>Don't stop</div>` 같은 JSX **텍스트** 안의 아포스트로피
+    까지 문자열 시작으로 오인해 같은 "스캔 조기 종료" 증상이 재발했다 — JSX
+    텍스트는 JS 문자열이 아니라 따옴표에 이스케이프/구분자 의미가 없다.
+    두 사례를 모두 만족하려면 "어디서든 나온 따옴표"가 아니라 "`attr=` 뒤에
+    바로(공백 허용) 오는 따옴표만" 문자열 시작으로 봐야 한다 — JSX 속성 할당의
+    실제 문법과 일치하는 신호라 오탐이 훨씬 적다. (여전히 문자 스캔 기반이라
+    템플릿 리터럴의 `${...}`, 정규식 리터럴, `=` 없이 오는 JS 문자열 리터럴
+    (예: 단순 `return 'x'`) 등 더 복잡한 경우까지 완벽히 다루진 않는다 —
+    reference.md 1-I의 알려진 한계와 같은 성격이며, 단일 패스 선형 스캔이라는
+    성질은 그대로 유지된다.)"""
     depth, quote, i, n = 0, None, open_idx, len(src)
     while i < n:
         ch = src[i]
@@ -205,7 +213,12 @@ def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch:
             if ch == quote:
                 quote = None
         elif ch in ("'", '"'):
-            quote = ch
+            j = i - 1
+            while j >= 0 and src[j] in " \t\r\n":
+                j -= 1
+            if j >= 0 and src[j] == "=":
+                quote = ch
+            # else: JSX 텍스트 안의 따옴표/아포스트로피 — 구분자로 보지 않는다.
         elif ch == open_ch:
             depth += 1
         elif ch == close_ch:
