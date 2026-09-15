@@ -406,8 +406,41 @@ def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch:
             i = _skip_regex_literal(src, i)
             continue
 
-        if mode == "code" and ch in ("'", '"', "`"):
+        if mode == "code" and ch in ("'", '"'):
             i = _skip_delimited(i + 1, ch)
+            continue
+
+        # 정확성 검증 발견(PR 리뷰): 백틱 문자열을 그냥 다음 백틱까지 통째로
+        # 건너뛰는 방식은, `` `x${`don't`}` `` 처럼 템플릿 리터럴 **안에** 또
+        # 템플릿 리터럴이 중첩되면 안쪽 여는 백틱을 바깥 문자열의 닫는
+        # 백틱으로 오인해 너무 일찍 끝내고, 그 뒤 "don't"의 아포스트로피를
+        # 문자열 시작으로 오인했다(§13.7과 같은 증상 재발). fetch 스캐너의
+        # `${...}` 보간 추적과 같은 방식으로 고친다: 백틱 문자열 안에서는
+        # "template" 모드로 문자 단위 스캔하다 `${`를 만나면 그 지점의 `{`를
+        # 일반 `{`와 동일하게 처리(mode를 "template"로 스택에 저장하고
+        # depth 증가, 표현식이므로 "code"로 전환)해 보간 내용은 정상적인
+        # 코드 맥락(문자열/중첩 백틱 포함)으로 재귀적으로 다뤄지고, 대응하는
+        # `}`에서 기존 일반 `}` 처리가 자동으로 "template"로 복귀시킨다.
+        if mode == "code" and ch == "`":
+            mode = "template"
+            i += 1
+            continue
+
+        if mode == "template":
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == "`":
+                mode = "code"
+                i += 1
+                continue
+            if ch == "$" and i + 1 < n and src[i + 1] == open_ch:
+                brace_modes.append("template")
+                mode = "code"
+                depth += 1
+                i += 2
+                continue
+            i += 1
             continue
 
         if ch == open_ch:
