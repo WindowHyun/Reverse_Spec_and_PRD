@@ -183,6 +183,39 @@ def _basename_no_ext(path: str) -> str:
     return base.split(".")[0] or path
 
 
+def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch: str) -> int:
+    """`_find_matching`과 같되, 큰따옴표/작은따옴표 문자열 리터럴 안의 여는/닫는
+    문자는 깊이 계산에서 제외한다(백슬래시 이스케이프도 건너뜀).
+
+    정확성 검증 발견(PR 리뷰): `_iter_jsx_route_blocks`가 순수 `_find_matching`을
+    쓰면, JSX 속성값 안의 리터럴 `{`(예: `label="{"`)까지 깊이로 세어버려 실제
+    닫는 `}`를 지나쳐 스캔이 어긋나고, 심하면 그 뒤에 오는 멀쩡한 라우트까지
+    스캔이 조기 종료로 통째로 사라졌다. 문자열 리터럴 안은 건너뛰도록 해 이
+    구체적인 사례(속성값 안의 리터럴 중괄호)를 바로잡는다. (여전히 문자
+    스캔 기반이라 템플릿 리터럴의 `${...}`, 정규식 리터럴 등 더 복잡한 경우까지
+    완벽히 다루진 않는다 — reference.md 1-I의 알려진 한계와 같은 성격이며,
+    단일 패스 선형 스캔이라는 성질은 그대로 유지된다.)"""
+    depth, quote, i, n = 0, None, open_idx, len(src)
+    while i < n:
+        ch = src[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+        elif ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
 def _iter_jsx_route_blocks(src: str):
     """`<Route path="..." element={ ... }>` 블록을 파일을 단 한 번만 좌→우로
     순회하며 찾는다.
@@ -191,8 +224,8 @@ def _iter_jsx_route_blocks(src: str):
     4000자로 제한"한 이전 수정은, `<Route path="x" element={` 접두어가 아주
     많이 반복되는 입력에서 "발견 횟수 × 4000자 상한"만큼 비용이 누적돼 여전히
     나쁘게 확장됐다(2MB 근처 입력에서 3초+, 그런 파일 100개면 누적 수 분).
-    대신 파일 전체를 한 번만 훑으며 각 발견 지점에서 `_find_matching`(괄호
-    깊이 카운팅, 이미 다른 추출기에서 쓰는 헬퍼)으로 대응하는 `}`를 찾고,
+    대신 파일 전체를 한 번만 훑으며 각 발견 지점에서 `_find_matching_skip_strings`
+    (괄호 깊이 카운팅 + 문자열 리터럴 건너뛰기)로 대응하는 `}`를 찾고,
     다음 탐색은 그 지점부터 이어간다 — 이미 훑은 구간을 다시 스캔하지 않으므로
     닫는 `}`가 정상적으로 존재하는 한 총 비용은 파일 길이에 선형이다.
     닫는 `}`를 못 찾으면(적대적으로 깨진 JSX) 그 지점에서 더 찾지 않고 전체
@@ -208,7 +241,7 @@ def _iter_jsx_route_blocks(src: str):
         if not m:
             return
         open_idx = m.end() - 1  # '{' 위치
-        close_idx = _find_matching(src, open_idx, "{", "}")
+        close_idx = _find_matching_skip_strings(src, open_idx, "{", "}")
         if close_idx == -1:
             return
         yield m.group(1), src[open_idx + 1:close_idx]
