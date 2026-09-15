@@ -183,6 +183,59 @@ def _basename_no_ext(path: str) -> str:
     return base.split(".")[0] or path
 
 
+def _looks_like_regex_start(src: str, idx: int) -> bool:
+    """`/`가 나눗셈 연산자가 아니라 정규식 리터럴의 시작일 것 같으면 True.
+
+    정확성 검증 발견 1차(PR 리뷰): `/don't/.test(value)`처럼 정규식 리터럴 안에
+    아포스트로피가 있으면, 코드 맥락 따옴표 스캐너들이 이를 문자열 시작으로
+    오인해 나머지 파일 끝까지 잘못 스캔했다 — `<`의 비교연산자/태그 모호성과
+    같은 종류의 문제("/"가 나눗셈인지 정규식 시작인지도 문법적으로 모호함,
+    실제 JS 토크나이저도 겪는 문제)라 `_looks_like_operator_lt`와 같은 해소
+    규칙을 쓴다: 직전(공백 제외)이 식별자 문자나 닫는 괄호/대괄호/중괄호면
+    "값이 방금 끝난 자리"라 `/`는 나눗셈, 아니면(여는 괄호/콤마/콜론/다른
+    연산자/시작 위치) 표현식이 새로 시작하는 자리라 정규식 리터럴로 본다.
+
+    정확성 검증 발견 2차(자체 재검토): `<Page label="{" />`의 자체닫힘 `/>`
+    에서, `/` 직전(공백 제외)이 속성값의 닫는 따옴표 `"`였는데 이는 "값이
+    방금 끝난 자리" 집합에 없어 정규식 시작으로 오판했다(§13.7 재발 증상) —
+    따옴표로 끝난 뒤의 `/`는 실제 JS에서도 나눗셈/자체닫힘일 수밖에 없고
+    (`"str"` 바로 뒤에 정규식이 올 문법은 없음) 정규식 시작일 수 없으므로,
+    닫는 따옴표도 "값이 방금 끝난 자리"에 포함한다."""
+    j = idx - 1
+    while j >= 0 and src[j] in " \t\r\n":
+        j -= 1
+    return not (j >= 0 and (src[j].isalnum() or src[j] in "_$)]}'\"`"))
+
+
+def _skip_regex_literal(src: str, idx: int) -> int:
+    """idx(정규식 리터럴 시작 `/`)부터, 대응하는 종료 `/`(문자 클래스 `[...]`
+    안의 `/`는 리터럴로 무시, 백슬래시 이스케이프 존중) 다음에 오는 플래그
+    문자(`g`, `i` 등)까지 건너뛴 위치를 반환한다. 개행을 만나거나 EOF까지
+    닫는 `/`를 못 찾으면(정규식이 아니라 실제 나눗셈이었을 가능성) 보수적으로
+    `idx + 1`만 건너뛴다."""
+    n = len(src)
+    j = idx + 1
+    in_class = False
+    while j < n:
+        c = src[j]
+        if c == "\\":
+            j += 2
+            continue
+        if c == "\n":
+            return idx + 1
+        if c == "[":
+            in_class = True
+        elif c == "]":
+            in_class = False
+        elif c == "/" and not in_class:
+            j += 1
+            while j < n and src[j].isalpha():
+                j += 1
+            return j
+        j += 1
+    return idx + 1
+
+
 def _looks_like_operator_lt(src: str, idx: int) -> bool:
     """`<`가 JSX 태그 시작이 아니라 `a < b`류 비교/제네릭 연산자로 쓰인 것 같으면
     True. 정확성 검증 발견(PR 리뷰, 4연속): `a <b && c > d ? <One/> : <Two/>`
@@ -312,6 +365,15 @@ def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch:
             i = end + 2 if end != -1 else n
             continue
 
+        # 정확성 검증 발견(PR 리뷰): `/don't/.test(value)`처럼 정규식 리터럴
+        # 안의 아포스트로피도 문자열 시작으로 오인해 같은 증상이 재발했다 —
+        # 나눗셈과 정규식 리터럴 시작은 문법적으로 모호하므로(`<`와 같은
+        # 종류의 문제) `_looks_like_regex_start`로 판정 후 건너뛴다.
+        if (mode == "code" and ch == "/" and i + 1 < n and src[i + 1] != "/"
+                and _looks_like_regex_start(src, i)):
+            i = _skip_regex_literal(src, i)
+            continue
+
         if mode == "code" and ch in ("'", '"', "`"):
             i = _skip_delimited(i + 1, ch)
             continue
@@ -355,9 +417,16 @@ def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch:
         if (ch == "<" and i + 1 < n and (src[i + 1].isalpha() or src[i + 1] == "/")
                 and not (mode == "code" and (_looks_like_operator_lt(src, i)
                                               or _looks_like_generic_params(src, i)))):
-            pending_tags.append((depth, src[i + 1] == "/", mode))
+            is_closing = src[i + 1] == "/"
+            pending_tags.append((depth, is_closing, mode))
             mode = "code"
-            i += 1
+            # 정확성 검증 발견(자체 재검토): 닫는 태그의 `/`(예: `</div>`)까지만
+            # 건너뛰고 그 `/` 자체는 다음 반복에서 별도 문자로 다시 보면,
+            # 방금 code 맥락으로 전환된 데다 직전 문자가 `<`(식별자/닫는 괄호가
+            # 아님)라 `_looks_like_regex_start`가 이를 정규식 리터럴 시작으로
+            # 오판했다(`<div>Don't stop</div>`가 다시 §13.7처럼 깨짐) — `<`와
+            # `/`를 한 번에 건너뛰어 그 `/`가 별도 문자로 재검사되지 않게 한다.
+            i += 2 if is_closing else 1
             continue
 
         if mode == "code" and ch == ">" and pending_tags and pending_tags[-1][0] == depth:
@@ -545,6 +614,15 @@ def _iter_fetch_calls(src: str):
             i = end + 2 if end != -1 else n
             continue
 
+        # 정확성 검증 발견(PR 리뷰): `/don't/.test(value); fetch("/real")`처럼
+        # 정규식 리터럴 안의 아포스트로피도 문자열 시작으로 오인해 그 뒤의
+        # 정상 fetch 호출을 놓쳤다 — 나눗셈과 정규식 리터럴 시작은 문법적으로
+        # 모호하므로 `_looks_like_regex_start`로 판정 후 건너뛴다.
+        if (mode == "code" and ch == "/" and i + 1 < n and src[i + 1] != "/"
+                and _looks_like_regex_start(src, i)):
+            i = _skip_regex_literal(src, i)
+            continue
+
         if mode == "code" and ch in ("'", '"'):
             q = ch
             j = i + 1
@@ -671,6 +749,19 @@ def _find_if_return_pairs(src: str) -> list:
                 quote = None
             i += 1
             continue
+        # 정확성 검증 발견(PR 리뷰): 라우트/fetch 스캐너와 같은 문제 —
+        # `/* don't */ if (x) return "bad"`처럼 조건 앞뒤 블록 주석 안의
+        # 아포스트로피를 문자열 시작으로 오인하면 이 if 전체를 못 찾았다.
+        if ch == "/" and i + 1 < n and src[i + 1] == "*":
+            end = src.find("*/", i + 2)
+            i = end + 2 if end != -1 else n
+            continue
+        # `/don't/.test(x)`류 정규식 리터럴 안의 아포스트로피도 같은 이유로
+        # 문자열 시작으로 오인될 수 있어 마찬가지로 건너뛴다.
+        if (ch == "/" and i + 1 < n and src[i + 1] != "/"
+                and _looks_like_regex_start(src, i)):
+            i = _skip_regex_literal(src, i)
+            continue
         if ch in ("'", '"', "`"):
             quote = ch
             i += 1
@@ -703,11 +794,16 @@ def extract_rules(files: dict) -> list:
         for condition, message in _find_if_return_pairs(src):
             rules.append({"kind": "입력 검증", "condition": condition,
                           "effect": f'메시지 "{message}"', "source": fname})
-        # min/max는 순서·인접에 무관하게(사이에 다른 속성 허용, 역순 허용) 잡는다
-        for m in re.finditer(r"min=\{(\w+)\}[^>]*?max=\{([\w.]+)\}", src):
+        # min/max는 순서·인접에 무관하게(사이에 다른 속성 허용, 역순 허용) 잡는다.
+        # 보안 검증 발견(PR 리뷰): 무경계 lazy `[^>]*?`는, `>`도 뒤따르는 `max=`도
+        # 없이 `min={x}`가 반복되는 입력에서 매 발견마다 나머지 파일 끝까지
+        # 훑어 이차식으로 느려졌다(112KB만으로 10초 가까이). 두 속성은 실제로
+        # 같은 태그의 인접 속성이라 몇십 자 이내가 보통이므로 300자로 상한을
+        # 둬 매 시도 비용을 상수로 고정한다.
+        for m in re.finditer(r"min=\{(\w+)\}[^>]{0,300}?max=\{([\w.]+)\}", src):
             rules.append({"kind": "범위 제한", "condition": f"min {m.group(1)} / max {m.group(2)}",
                           "effect": "입력값 범위 강제", "source": fname})
-        for m in re.finditer(r"max=\{([\w.]+)\}[^>]*?min=\{(\w+)\}", src):
+        for m in re.finditer(r"max=\{([\w.]+)\}[^>]{0,300}?min=\{(\w+)\}", src):
             rules.append({"kind": "범위 제한", "condition": f"min {m.group(2)} / max {m.group(1)}",
                           "effect": "입력값 범위 강제", "source": fname})
         # disabled={...} 의 조건은 중첩 중괄호(화살표 블록/객체)까지 포함해 잡는다
