@@ -207,22 +207,38 @@ def _looks_like_operator_lt(src: str, idx: int) -> bool:
     return j >= 0 and (src[j].isalnum() or src[j] in "_$)]}")
 
 
+_GENERIC_CONSTRAINT_KEYWORDS = ("extends",)
+
+
 def _looks_like_generic_params(src: str, idx: int) -> bool:
     """`<`가 JSX 태그 시작이 아니라 TSX 제네릭 매개변수 목록(`<T,>(x: T) => x`
     같은, `.tsx`에서 JSX와 제네릭 화살표 함수를 구분하려고 일부러 트레일링
-    콤마를 붙이는 관용구)일 것 같으면 True.
+    콤마를 붙이는 관용구, 또는 `<T extends object>(x: T) => x` 같은 제약
+    제네릭)일 것 같으면 True.
 
-    정확성 검증 발견(PR 리뷰): `fn={<T,>(x: T) => x}`에서 `<T,`는 `_looks_like_operator_lt`
-    기준(직전이 `{`)으로는 "연산자 아님 = 태그"로 판정돼, `<T,>`를 여는 태그로
-    오인하고 그 `>`를 태그 종료로 소비해 뒤따르는 `(x: T) => x`가 JSX 텍스트로
-    잘못 처리됐다(§13.9와 같은 근본 문제의 또 다른 얼굴 — `<`의 모호성은
-    비교연산자뿐 아니라 제네릭에도 있다). JSX 태그 이름 뒤에는 항상 공백/`>`/
-    `/`가 오고 콤마가 바로 오는 경우는 없으므로(그러면 문법 오류), 식별자 뒤
-    첫 비식별자 문자가 콤마면 제네릭 매개변수 목록으로 본다."""
+    정확성 검증 발견 1차(PR 리뷰): `fn={<T,>(x: T) => x}`에서 `<T,`는
+    `_looks_like_operator_lt` 기준(직전이 `{`)으로는 "연산자 아님 = 태그"로
+    판정돼, `<T,>`를 여는 태그로 오인하고 그 `>`를 태그 종료로 소비해 뒤따르는
+    `(x: T) => x`가 JSX 텍스트로 잘못 처리됐다(§13.9와 같은 근본 문제의 또
+    다른 얼굴 — `<`의 모호성은 비교연산자뿐 아니라 제네릭에도 있다). JSX 태그
+    이름 뒤에는 콤마가 바로 오는 경우가 없으므로(그러면 문법 오류), 식별자 뒤
+    (공백 허용) 첫 문자가 콤마면 제네릭으로 본다.
+    정확성 검증 발견 2차(PR 리뷰): `<T extends object>`처럼 제약이 있는
+    제네릭은 콤마 없이 `extends` 키워드로 이어져 1차 수정을 통과하지 못했다
+    — 식별자 뒤에 `extends` 키워드(단어 경계 확인)가 오는 경우도 같이 본다."""
     j = idx + 1
     while j < len(src) and (src[j].isalnum() or src[j] in "_$"):
         j += 1
-    return j < len(src) and src[j] == ","
+    k = j
+    while k < len(src) and src[k] in " \t\r\n":
+        k += 1
+    if k < len(src) and src[k] == ",":
+        return True
+    for kw in _GENERIC_CONSTRAINT_KEYWORDS:
+        end = k + len(kw)
+        if src[k:end] == kw and (end >= len(src) or not (src[end].isalnum() or src[end] in "_$")):
+            return True
+    return False
 
 
 def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch: str) -> int:
@@ -462,19 +478,40 @@ def _find_matching_paren(src: str, open_idx: int) -> int:
     return _find_matching(src, open_idx, "(", ")")
 
 
-def _find_matching_paren_skip_strings(src: str, open_idx: int) -> int:
-    """`_find_matching_paren`과 같되, 문자열/템플릿 리터럴 안의 괄호는 깊이
-    계산에서 제외한다(백슬래시 이스케이프 존중).
+_FETCH_START = re.compile(r'fetch\(\s*[\'"`]([^\'"`]+)[\'"`]')
 
-    정확성 검증 발견(PR 리뷰): fetch 인자 문자열 안에 짝이 안 맞는 괄호가
-    있으면(예: JSON 바디 값 `{body: "("}`) 순수 괄호 카운팅이 깊이를 잘못
-    계산해 EOF까지 스캔하며 -1을 반환했고, `_iter_fetch_calls`의 "못 찾으면
-    전체 탐색 종료" 규칙 때문에 그 뒤에 오는 멀쩡한 `fetch(...)` 호출까지
-    전부 누락됐다(이전의 독립 정규식 반복 방식은 한 매치가 이상해도 나머지는
-    계속 찾았는데, 성능을 위해 단일 패스로 바꾸며 이 견고함을 실수로
-    잃었다). fetch 인자는 JSX가 아니라 순수 JS 표현식이라 "텍스트 맥락"
-    구분이 필요 없어 라우트 스캐너보다 단순한 버전으로 충분하다."""
-    depth, quote, i, n = 0, None, open_idx, len(src)
+
+def _iter_fetch_calls(src: str):
+    """`fetch(...)` 호출(중첩 포함)을 파일을 단 한 번만 좌→우로 순회하며 찾는다.
+
+    3단계에 걸친 재검토 끝에 나온 설계다:
+    1차: 각 `fetch("x"` 발견마다 독립적으로 `_find_matching_paren`을 불러
+         닫는 `)`를 찾았는데, 닫히지 않는 접두어가 반복되면 매 발견마다
+         나머지 파일 끝까지 스캔해 이차식으로 느려졌다(20KB만으로 1초+).
+    2차: "발견마다 이미 지나온 구간은 다시 스캔하지 않고, 못 찾으면 전체
+         탐색 종료"로 바꿔 위 문제는 해결했지만, 두 가지를 놓쳤다 — (a) 인자
+         문자열 안의 짝 안 맞는 괄호(예: JSON 바디 `"("`)가 있으면 정말
+         못 찾은 것처럼 보여 그 뒤의 멀쩡한 호출까지 전부 사라졌고, (b) 바깥
+         호출의 닫는 `)` 다음으로 건너뛰다 보니 `fetch("/outer", {x: fetch("/inner")})`
+         처럼 인자 **안에 중첩된** fetch 호출은 통째로 지나쳐 아예 못 찾았다.
+         (b)를 "바깥을 찾은 뒤 그 인자 범위 안을 다시 검색"으로 고치면, 깊이
+         중첩된 입력(`fetch(fetch(fetch(...)))`)에서 바깥쪽일수록 매번 남은
+         전체를 다시 훑어 또 이차식(중첩 깊이 기준)이 될 위험이 있었다.
+    3차(현재): `fetch(` 발견 지점 전체를 먼저 한 번의 `finditer`로 모아두고,
+         파일을 정말 **한 번만** 좌→우로 훑으며 괄호 깊이를 추적한다 — 그
+         발견 지점의 `(`을 지날 때 (그 시점의 깊이, 끝점 문자열)을 스택에
+         쌓고, 어떤 `)`에서 깊이가 스택 맨 위가 열렸던 깊이로 돌아오면 그
+         호출이 완결된 것으로 보아 즉시 내보낸다. 문자열/템플릿 리터럴 안의
+         괄호는 깊이에서 제외한다. 각 문자를 정확히 한 번씩만 방문하므로
+         중첩 개수·깊이와 무관하게 전체 비용은 파일 길이에 선형이고, 특정
+         호출 하나가 안 닫혀도(스택에 그대로 남을 뿐) 다른 호출 탐색을 막지
+         않는다 — 2차의 "하나가 이상하면 나머지 다 못 찾음" 취약점도 함께
+         해소된다."""
+    starts = {m.start() + 5: m.group(1) for m in _FETCH_START.finditer(src)}  # '(' 위치 -> endpoint
+    if not starts:
+        return
+    stack: list = []  # [(그 호출의 '('을 지날 때의 깊이, endpoint, '(' 위치), ...]
+    depth, quote, i, n = 0, None, 0, len(src)
     while i < n:
         ch = src[i]
         if quote:
@@ -487,40 +524,14 @@ def _find_matching_paren_skip_strings(src: str, open_idx: int) -> int:
             quote = ch
         elif ch == "(":
             depth += 1
+            if i in starts:
+                stack.append((depth, starts[i], i))
         elif ch == ")":
+            if stack and stack[-1][0] == depth:
+                _, endpoint, paren_idx = stack.pop()
+                yield endpoint, src[paren_idx:i + 1]
             depth -= 1
-            if depth == 0:
-                return i
         i += 1
-    return -1
-
-
-_FETCH_START = re.compile(r'fetch\(\s*[\'"`]([^\'"`]+)[\'"`]')
-
-
-def _iter_fetch_calls(src: str):
-    """`fetch(...)` 호출을 파일을 단 한 번만 좌→우로 순회하며 찾는다.
-
-    보안 검증 발견(PR 리뷰): 이전 구현은 `re.finditer`로 찾은 각 `fetch("x"`
-    발견마다 독립적으로 `_find_matching_paren`을 호출해 닫는 `)`를 찾았는데,
-    이는 라우트 추출기가 §13.4에서 겪은 것과 같은 근본 원인이다 — 닫히지 않는
-    `fetch("x" ` 접두어가 반복되면 매 발견마다 나머지 파일 끝까지 스캔해
-    이차식으로 느려졌다(20KB 입력만으로 1초+ 실측). §13.4/13.5와 같은 패턴으로
-    단일 패스로 교체: 발견마다 이미 지나온 구간은 다시 스캔하지 않는다.
-    문자열 안 괄호는 `_find_matching_paren_skip_strings`가 걸러내므로, 닫는
-    `)`를 못 찾는 경우는 정말로 괄호가 깨진(적대적이거나 손상된) 입력뿐이라고
-    보고 그 지점에서 전체 탐색을 즉시 종료한다(재시도 스캔 없음)."""
-    pos, n = 0, len(src)
-    while pos < n:
-        m = _FETCH_START.search(src, pos)
-        if not m:
-            return
-        paren_idx = src.index("(", m.start())
-        close_idx = _find_matching_paren_skip_strings(src, paren_idx)
-        if close_idx == -1:
-            return
-        yield m.group(1), src[paren_idx:close_idx + 1]
-        pos = close_idx + 1
 
 
 def extract_api_calls(files: dict) -> list:
