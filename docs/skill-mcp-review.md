@@ -413,6 +413,30 @@ PR #1에 올린 §13 수정 직후 자동 리뷰봇이 그 수정 코드 자체�
 기존 코드스팬 보존 회귀 테스트 + mock-shop 결정성(2회 해시 동일) + 전체
 extract→render HTML 파이프라인 재실행으로 정상 렌더링 확인.
 
+### 13.3 HTMLParser 전환 직후 발견된 P1 1건 + P2 1건 (2026-09-15)
+
+§13.2를 올리자 같은 리뷰봇이 새 구현에서 다시 2건을 찾았다 — 하나는 보안(URL
+속성 커버리지 부족), 하나는 심각한 데이터 유실 회귀(void 요소 처리 누락).
+
+- **P1 — href/src 외 내비게이션 속성 미검사**: `<form action="javascript:...">`,
+  `formaction`, SVG `xlink:href`처럼 URL을 담는 다른 속성은 스킴 검사 대상이
+  아니어서 그대로 통과했다 — 재현 확인 후 `_URL_ATTRS`에
+  `action/formaction/xlink:href/poster/background`를 추가.
+- **P2 — void 요소가 skip_depth를 영구히 올려 이후 문서 전체가 사라짐**:
+  `link`/`embed`는 HTML의 "빈 요소"(void element)라 애초에 닫는 태그가 없는데,
+  이 구현은 명시적 `/>` 없이 온 `<link href=x>`를 "닫힘을 기다리는 위험 태그"로
+  취급해 `_skip_depth`가 영원히 0으로 안 돌아왔다 — `before<link href=x>after`가
+  `before`만 남기고 `after`를 통째로 삼켜버리는 실측 재현(보안 문제가 아니라
+  치명적인 문서 유실 버그). HTML 표준 void 요소 목록(`area/base/br/col/embed/
+  hr/img/input/link/meta/param/source/track/wbr`)을 두고, 이 목록에 속하면
+  명시적 슬래시 유무와 무관하게 항상 self-closing으로 취급하도록 수정. 종료
+  태그 쪽도 대칭적으로 방어(void 위험 태그의 `</...>`가 와도 무관한 depth를
+  잘못 줄이지 않음).
+
+재검증: 두 재현 케이스 모두 해결 + §13.1/13.2에서 확정한 모든 재현 케이스
+재통과(ReDoS 2종·따옴표 우회·엔티티 우회·코드스팬 보존) + mock-shop 결정성
++ 전체 파이프라인 재실행.
+
 ---
 
 ### 출처

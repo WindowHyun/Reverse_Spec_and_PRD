@@ -71,8 +71,21 @@ def _pdf_url_fetcher(url: str, *args, **kwargs):
 # 교체했다. 위험 태그(및 그 내용)는 통째로 버리고, 남는 태그는 이벤트 속성 제거·
 # URL 스킴 정규화 후 재직렬화한다.
 _DANGEROUS_TAG_NAMES = {"script", "iframe", "object", "embed", "style", "link"}
-_URL_ATTRS = {"href", "src"}
+# 보안 검증 발견(PR 리뷰, 4차): href/src만 스킴을 검사해 <form action="javascript:...">,
+# formaction, SVG xlink:href 같은 다른 내비게이션 속성은 그대로 통과했다 — URL을
+# 담을 수 있는 속성을 폭넓게 검사한다.
+_URL_ATTRS = {"href", "src", "action", "formaction", "xlink:href", "poster", "background"}
 _CONTROL_CHARS = re.compile(r"[\x00-\x20]+")
+# 보안 검증 발견(PR 리뷰, 4차): HTML의 "빈 요소"(void element)는 애초에 닫는 태그가
+# 존재하지 않는다. `link`/`embed`가 위험 태그 목록에 있는데 이를 몰랐더니,
+# `<link href=x>`처럼 `/`로 안 닫힌 형태가 나오면 매칭되는 `</link>`가 영원히
+# 오지 않아 skip_depth가 계속 올라간 채 남아 그 뒤의 문서 전체가 사라졌다(보안
+# 문제가 아니라 심각한 데이터 유실 회귀) — 빈 요소는 여는 태그만으로 항상
+# self-closing으로 취급한다.
+_VOID_ELEMENTS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+}
 
 
 def _has_dangerous_scheme(value: str) -> bool:
@@ -99,6 +112,7 @@ class _HtmlSanitizer(HTMLParser):
 
     def _open(self, tag, attrs, self_closing):
         tl = tag.lower()
+        self_closing = self_closing or tl in _VOID_ELEMENTS
         if tl in _DANGEROUS_TAG_NAMES:
             if not self_closing:
                 self._skip_depth += 1
@@ -133,8 +147,12 @@ class _HtmlSanitizer(HTMLParser):
         self._open(tag, attrs, self_closing=True)
 
     def handle_endtag(self, tag):
-        if tag.lower() in _DANGEROUS_TAG_NAMES:
-            if self._skip_depth:
+        tl = tag.lower()
+        # 빈 요소는 _open에서 애초에 skip_depth를 올리지 않으므로, 형식이
+        # 어긋난 `</link>` 같은 종료 태그가 (있을 리 없지만) 나타나더라도
+        # 무관한 depth를 잘못 줄이지 않도록 대칭적으로 무시한다.
+        if tl in _DANGEROUS_TAG_NAMES:
+            if tl not in _VOID_ELEMENTS and self._skip_depth:
                 self._skip_depth -= 1
             return
         if not self._skip_depth:
