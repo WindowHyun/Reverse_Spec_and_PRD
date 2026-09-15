@@ -54,16 +54,27 @@ def _pdf_url_fetcher(url: str, *args, **kwargs):
     return default_url_fetcher(url, *args, **kwargs)
 
 
+# 보안 검증 발견(재검토, PR 리뷰): 여는/닫는 태그를 통째로 한 쌍으로 매칭하려던
+# 이전 버전(`<script>...내용...</script>` 전체를 `.*?`로 탐색)은, 닫히지 않는
+# `<script>` 토큰이 반복되는 적대적 입력에서 각 시작 위치마다 나머지 문서
+# 전체를 상대로 백트래킹해 초선형(superlinear) 시간이 걸렸다 — 1,000개 반복
+# (~8KB)만으로 10초 이상 걸리는 CPU DoS가 실측 재현됨. 여는/닫는 태그를 각각
+# 개별적으로(내용은 남기고 태그만) 제거하는 방식으로 바꿔 매 매치가 다음 `>`
+# 하나로 폭이 정해지는 선형 시간 패턴으로 교체했다 — 내용이 페이지에 텍스트로
+# 남더라도 실행 가능한 태그 자체가 사라지므로 목적(스크립트 실행 차단)은
+# 동일하게 달성된다.
 _DANGEROUS_TAGS = re.compile(
-    r"<\s*(script|iframe|object|embed|style|link)\b.*?(?:/\s*>|>.*?<\s*/\s*\1\s*>)",
-    re.I | re.S)
+    r"<\s*/?\s*(?:script|iframe|object|embed|style|link)\b[^>]*>", re.I)
 # 진짜 태그(<...>) 구간에서만 이벤트 속성/위험 스킴을 다듬는다 — 코드스팬 등
 # 이미 HTML 엔티티로 이스케이프된 텍스트는 리터럴 `<`/`>`가 없어 이 패턴에
 # 매칭되지 않으므로 건드리지 않는다.
 _TAG = re.compile(r"<[a-zA-Z][^<>]*>")
 _EVENT_ATTR = re.compile(r'\son\w+\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)', re.I)
+# 보안 검증 발견(재검토, PR 리뷰): 값이 따옴표로 감싸여 있을 때만 매칭해,
+# `href=javascript:alert(1)`처럼 따옴표 없는 속성값은 그대로 통과시켰다 —
+# 따옴표는 선택 사항으로 바꿔 두 형태 모두 잡는다.
 _DANGEROUS_SCHEME_ATTR = re.compile(
-    r'\b(href|src)(\s*=\s*)(["\'])\s*(javascript:|vbscript:|data:text/html)', re.I)
+    r'\b(href|src)(\s*=\s*)(["\']?)\s*(javascript:|vbscript:|data:text/html)', re.I)
 
 
 def _clean_tag(m: "re.Match") -> str:
