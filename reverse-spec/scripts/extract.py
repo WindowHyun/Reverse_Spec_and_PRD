@@ -183,6 +183,38 @@ def _basename_no_ext(path: str) -> str:
     return base.split(".")[0] or path
 
 
+def _iter_jsx_route_blocks(src: str):
+    """`<Route path="..." element={ ... }>` 블록을 파일을 단 한 번만 좌→우로
+    순회하며 찾는다.
+
+    보안 검증 발견(PR 리뷰, 재재검토): "각 발견마다 독립적으로 재스캔하되 길이를
+    4000자로 제한"한 이전 수정은, `<Route path="x" element={` 접두어가 아주
+    많이 반복되는 입력에서 "발견 횟수 × 4000자 상한"만큼 비용이 누적돼 여전히
+    나쁘게 확장됐다(2MB 근처 입력에서 3초+, 그런 파일 100개면 누적 수 분).
+    대신 파일 전체를 한 번만 훑으며 각 발견 지점에서 `_find_matching`(괄호
+    깊이 카운팅, 이미 다른 추출기에서 쓰는 헬퍼)으로 대응하는 `}`를 찾고,
+    다음 탐색은 그 지점부터 이어간다 — 이미 훑은 구간을 다시 스캔하지 않으므로
+    닫는 `}`가 정상적으로 존재하는 한 총 비용은 파일 길이에 선형이다.
+    닫는 `}`를 못 찾으면(적대적으로 깨진 JSX) 그 지점에서 더 찾지 않고 전체
+    탐색을 종료한다 — 재시도하며 반복 스캔하지 않으므로, 안 닫히는 접두어가
+    아무리 많이 반복돼도 전체 비용은 파일을 한 번 훑는 것으로 고정된다.
+    (실제 동작하는 코드는 문법상 괄호가 항상 맞으므로, 이 조기 종료 경로는
+    적대적이거나 손상된 입력에서만 타고, 정상 파일의 라우트 추출에는 영향이
+    없다.)"""
+    pat = re.compile(r'<Route\s+path="([^"]+)"\s+element=\{')
+    pos, n = 0, len(src)
+    while pos < n:
+        m = pat.search(src, pos)
+        if not m:
+            return
+        open_idx = m.end() - 1  # '{' 위치
+        close_idx = _find_matching(src, open_idx, "{", "}")
+        if close_idx == -1:
+            return
+        yield m.group(1), src[open_idx + 1:close_idx]
+        pos = close_idx + 1
+
+
 def extract_routes(files: dict) -> list:
     routes = []
     for fname, src in files.items():
@@ -195,16 +227,9 @@ def extract_routes(files: dict) -> list:
                 routes.append({"path": m_path.group(1), "component": component,
                                "guard": guard, "source": fname})
         # React Router JSX: element={ ... } 전체를 캡처해 가드/컴포넌트 파싱.
-        # 보안 검증 발견(PR 리뷰): 파일 크기 상한(MAX_FILE_BYTES) 안에서도, 닫히지
-        # 않는 `<Route path="x" element={` 접두어가 대량 반복되면 이 무경계
-        # lazy `.*?`가 매 시작 위치마다 나머지 파일 끝까지 스캔해 실패하며
-        # 이차식으로 느려졌다(200KB 입력에서 12초+ 실측). 실제 route element JSX
-        # 블록은 보통 수백 자를 넘지 않으므로 4000자로 상한을 둬 매 시도 비용을
-        # 상수로 고정한다 — 상한을 넘는 비정상적으로 긴 element 블록은 매칭
-        # 실패로 처리되어 건너뛴다(다른 정상 라우트 추출에는 영향 없음).
-        for m in re.finditer(r'<Route\s+path="([^"]+)"\s+element=\{(.{0,4000}?)\}\s*/?>', src, re.S):
-            component, guard = _component_and_guard(m.group(2))
-            routes.append({"path": m.group(1), "component": component,
+        for path, element_src in _iter_jsx_route_blocks(src):
+            component, guard = _component_and_guard(element_src)
+            routes.append({"path": path, "component": component,
                            "guard": guard, "source": fname})
         # Vue Router: path와 component 사이에 meta:{...} 등 중첩 객체가 있어도
         # 매칭되도록, 그리고 lazy-load(() => import("..."))도 잡도록 개선.

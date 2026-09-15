@@ -75,8 +75,12 @@ def _pdf_url_fetcher(url: str, *args, **kwargs):
 # *간접적으로* 주입할 수 있어, href/src 등 이름으로만 검사하는 방식을 완전히
 # 우회한다 — 속성 이름/값 조합을 흉내 내 막기보다, 이 요소들 자체를 위험 태그로
 # 취급해 통째로 제거한다.
+# 보안 검증 발견(PR 리뷰, 6차): `<meta http-equiv="refresh" content="0;url=…">`는
+# href/src류 속성이 전혀 없이 `content` 값만으로 리더를 공격자 페이지로 즉시
+# 리다이렉트시킨다 — URL 속성 검사로는 원천적으로 못 잡는 패턴이라 `meta` 자체를
+# 위험 태그로 취급해 제거한다(HTML void 요소라 `_VOID_ELEMENTS`에도 이미 있음).
 _DANGEROUS_TAG_NAMES = {
-    "script", "iframe", "object", "embed", "style", "link",
+    "script", "iframe", "object", "embed", "style", "link", "meta",
     "animate", "set", "animatemotion", "animatetransform",
 }
 # 보안 검증 발견(PR 리뷰, 4차): href/src만 스킴을 검사해 <form action="javascript:...">,
