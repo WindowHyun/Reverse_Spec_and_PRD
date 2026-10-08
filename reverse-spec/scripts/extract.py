@@ -642,14 +642,25 @@ def _looks_like_executable_attr(src: str, quote_idx: int) -> bool:
     (`onclick="..."`, `@click="..."`, `v-on:click="..."`)의 시작이면 True.
     이런 속성값은 문자열이 아니라 그대로 실행되는 코드라, `_iter_fetch_calls`가
     보통의 인자 문자열처럼 통째로 건너뛰면 그 안의 `fetch(...)`를 놓친다.
-    직전이 `=`이고, 그 앞의 속성 이름이 `on행동`/`@행동`/`v-on:행동` 패턴과
-    일치하는지만 본다(공백 없이 바로 `=`+따옴표가 오는 실제 속성 구문 기준)."""
-    if quote_idx == 0 or src[quote_idx - 1] != "=":
-        return False
-    j = quote_idx - 2
-    while j >= 0 and (src[j].isalnum() or src[j] in "_@:.$-"):
+    직전(공백 제외)이 `=`이고, 그 앞의 속성 이름이 `on행동`/`@행동`/`v-on:행동`
+    패턴과 일치하는지를 본다.
+
+    코드 리뷰 발견(자체 재검토): 직전 문자가 정확히 `=`일 때만 인식했는데,
+    `onclick = "fetch('/x')"`처럼 `=` 양쪽에 공백이 있는(HTML/JSX 문법상 유효한)
+    형태는 그 공백 때문에 핸들러 속성으로 인식되지 못해 안의 fetch 호출을
+    놓쳤다(직접 실행해 확인) — 따옴표 앞 공백을 건너뛰고 `=`를 찾도록 고쳤다."""
+    j = quote_idx - 1
+    while j >= 0 and src[j] in " \t":
         j -= 1
-    name = src[j + 1:quote_idx - 1]
+    if j < 0 or src[j] != "=":
+        return False
+    j -= 1
+    while j >= 0 and src[j] in " \t":
+        j -= 1
+    k = j
+    while k >= 0 and (src[k].isalnum() or src[k] in "_@:.$-"):
+        k -= 1
+    name = src[k + 1:j + 1]
     return bool(_HANDLER_ATTR_RE.match(name))
 
 

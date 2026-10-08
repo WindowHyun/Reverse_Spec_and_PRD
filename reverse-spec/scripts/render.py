@@ -79,8 +79,14 @@ def _pdf_url_fetcher(url: str, *args, **kwargs):
 # href/src류 속성이 전혀 없이 `content` 값만으로 리더를 공격자 페이지로 즉시
 # 리다이렉트시킨다 — URL 속성 검사로는 원천적으로 못 잡는 패턴이라 `meta` 자체를
 # 위험 태그로 취급해 제거한다(HTML void 요소라 `_VOID_ELEMENTS`에도 이미 있음).
+# 코드 리뷰 발견(자체 재검토): `<base href="https://evil.example/">`는 `base`가
+# `_DANGEROUS_TAG_NAMES`에 없어 그대로 통과했다 — href는 `_URL_ATTRS`에 걸리지만
+# `_has_dangerous_scheme`는 javascript:/vbscript:/data:text/html만 막아 평범한
+# https:// 호스트는 차단하지 않는다. `<base>`는 문서의 모든 상대경로 링크/이미지/
+# 스타일시트의 기준 URL을 바꿔버리므로, 정상 https URL이어도 그 자체로 위험해
+# meta/animate와 같은 이유로 통째로 제거한다(이미 `_VOID_ELEMENTS`에도 있음).
 _DANGEROUS_TAG_NAMES = {
-    "script", "iframe", "object", "embed", "style", "link", "meta",
+    "script", "iframe", "object", "embed", "style", "link", "meta", "base",
     "animate", "set", "animatemotion", "animatetransform",
 }
 # 보안 검증 발견(PR 리뷰, 4차): href/src만 스킴을 검사해 <form action="javascript:...">,
@@ -139,6 +145,13 @@ class _HtmlSanitizer(HTMLParser):
         for name, value in attrs:
             nl = name.lower()
             if nl.startswith("on"):
+                continue
+            # 코드 리뷰 발견(자체 재검토): `style` 속성값은 이름/스킴 검사 대상이
+            # 아니라 그대로 통과했다 — `style="background:url(https://evil/..)"`
+            # 같은 CSS로 조용히 외부로 비콘을 보내거나 `style="...;--x:...;"` 류로
+            # 레이아웃을 조작할 수 있다. CSS 값을 안전하게 검증할 방법이 없으므로
+            # `on*` 이벤트 핸들러와 같은 방식으로 속성 자체를 통째로 제거한다.
+            if nl == "style":
                 continue
             if nl in _URL_ATTRS and _has_dangerous_scheme(value):
                 value = "blocked:" + value
@@ -202,14 +215,78 @@ def _sanitize_html_fragment(html_text: str) -> str:
     return "".join(parser.out)
 
 
+_SAFE_CSS_COLOR = re.compile(r"^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$|^[a-zA-Z]{1,20}$")
+_SAFE_LANG_TAG = re.compile(r"^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$")
+
+
+def _safe_css_color(value: str, default: str) -> str:
+    """코드 리뷰 발견(자체 재검토): `accent`가 `h1 {{ ... {accent}; }}`처럼 CSS
+    선언 값 자리에 따옴표 없이 그대로 꽂힌다 — 여기엔 이스케이프로 막을 '문자열'이
+    없고(값 자체가 토큰), `accent="red;}}</style><script>..."` 같은 입력이 그대로
+    `</style>` 바깥으로 탈출해 `<script>`를 주입할 수 있었다(직접 실행해 확인).
+    CSS 색상 값은 애초에 표현 가능한 문자 집합이 좁으므로, 이스케이프 대신
+    hex 코드(`#rgb`/`#rrggbb`) 또는 알파벳 색상명만 허용하는 허용목록으로
+    검증하고, 벗어나면 기본값으로 대체한다(stderr 경고)."""
+    if _SAFE_CSS_COLOR.match(value):
+        return value
+    print(f"⚠️  --accent 값이 올바른 CSS 색상 형식이 아니라 기본값으로 대체합니다: {value!r}",
+          file=sys.stderr)
+    return default
+
+
+def _safe_lang_tag(value: str, default: str) -> str:
+    """코드 리뷰 발견(자체 재검토): `lang`이 `<html lang="{lang}">`의 속성값
+    자리에 그대로 꽂힌다 — `lang='ko"><script>...'`처럼 따옴표를 포함하면 속성을
+    조기에 닫고 임의 태그를 주입할 수 있었다(직접 실행해 확인). BCP47 언어
+    태그는 알파벳·숫자·하이픈만 쓰므로, 그 형식만 허용하는 허용목록으로
+    검증하고 벗어나면 기본값으로 대체한다(stderr 경고) — accent와 같은 설계."""
+    if _SAFE_LANG_TAG.match(value):
+        return value
+    print(f"⚠️  --lang 값이 올바른 언어 태그 형식이 아니라 기본값으로 대체합니다: {value!r}",
+          file=sys.stderr)
+    return default
+
+
+def _css_dquote_escape(value: str) -> str:
+    """코드 리뷰 발견(자체 재검토): `title`이 `@page`의 `content: "{title}";`
+    처럼 CSS 큰따옴표 문자열 리터럴 안에 그대로 꽂힌다 — `"`로 문자열을 조기에
+    끝낸 뒤 `}}`로 CSS 규칙을, `</style>`로 HTML `<style>` 요소까지 깨고 나가
+    `<script>`를 주입할 수 있었다(직접 실행해 확인). 백슬래시·큰따옴표를
+    CSS 문자열 이스케이프로 무력화하고, `<`/`>`도 CSS 16진 이스케이프(`\\3c `/
+    `\\3e `, 끝의 공백이 이스케이프 종료자)로 바꾼다 — `<style>`은 CSS 파싱 전에
+    브라우저가 리터럴 `</style` 문자열을 찾아 raw-text 파싱을 끝내버리므로,
+    CSS 문자열 이스케이프만으로는 그 탈출을 막을 수 없기 때문이다.
+
+    자체 재검토(이 수정 자체의 버그): 제어문자 제거에 `_CONTROL_CHARS`
+    (`[\\x00-\\x20]+`, URL 스킴 접두어의 공백을 지우기 위한 패턴)를 그대로
+    재사용했다가, 0x20(스페이스)까지 지워져 "역기획 PRD"가 "역기획PRD"로
+    공백이 사라지는 회귀를 내 직접 테스트로 발견했다 — 제목 텍스트는 공백을
+    보존해야 하므로 스페이스를 제외한 제어문자(`\\x00-\\x1f`)만 지우는
+    별도 정규식을 쓴다."""
+    value = re.sub(r"[\x00-\x1f]", "", value)
+    value = value.replace("\\", "\\\\").replace('"', '\\"')
+    value = value.replace("<", "\\3c ").replace(">", "\\3e ")
+    return value
+
+
 def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
     import markdown
+    # 코드 리뷰 발견(자체 재검토): 이 함수는 본문(md_text)만 _sanitize_html_fragment로
+    # 걸렀을 뿐, title/accent/lang은 전혀 검증 없이 아래 템플릿의 HTML 속성/CSS
+    # 값/CSS 문자열 자리에 바로 꽂혔다 — render.py가 이미 --name에 적용한 것과
+    # 같은 전제(이 스크립트는 분석된 저장소 내용을 바탕으로 에이전트가 인자를
+    # 구성하므로 untrusted)가 이 세 인자에도 똑같이 적용되는데, 이 PR이 막으려던
+    # XSS를 본문이 아닌 다른 입력 경로로 그대로 재현할 수 있었다(직접 실행해 확인).
+    accent = _safe_css_color(accent, "#1f4e79")
+    lang = _safe_lang_tag(lang, "ko")
+    title_css = _css_dquote_escape(title)
+    lang_attr = html.escape(lang, quote=True)
     # python-markdown 코어에 취소선(~~text~~)이 없어 <del>로 선치환 (HTML/PDF 공통)
     md_text = re.sub(r"~~(.+?)~~", r"<del>\1</del>", md_text)
     body = markdown.markdown(md_text, extensions=["tables", "toc", "fenced_code"])
     body = _sanitize_html_fragment(body)
     return f"""<!DOCTYPE html>
-<html lang="{lang}">
+<html lang="{lang_attr}">
 <head>
 <meta charset="UTF-8">
 <style>
@@ -237,7 +314,7 @@ def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
   @page {{
     size: A4;
     margin: 20mm 18mm 20mm 20mm;
-    @top-center {{ content: "{title}"; font-size: 9pt; color: #888; }}
+    @top-center {{ content: "{title_css}"; font-size: 9pt; color: #888; }}
     @bottom-right {{ content: counter(page) " / " counter(pages); font-size: 9pt; color: #888; }}
   }}
 </style>
