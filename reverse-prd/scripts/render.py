@@ -37,10 +37,8 @@ from html.parser import HTMLParser
 _ALLOWED_FETCH_HOSTS = {"fonts.googleapis.com", "fonts.gstatic.com"}
 
 
-def _pdf_url_fetcher(url: str, *args, **kwargs):
-    """weasyprint용 URL fetcher.
-
-    보안 검증 발견 (1차): 기본 fetcher가 file:// 스킴을 그대로 가져와, 분석 대상이
+def _check_pdf_fetch_url(url: str) -> None:
+    """보안 검증 발견 (1차): 기본 fetcher가 file:// 스킴을 그대로 가져와, 분석 대상이
     통제 못하는 문서에 `<link href="file:///etc/passwd">` 같은 참조가 있으면 로컬
     파일을 읽어 PDF에 임베드할 수 있었다(정보 노출).
     보안 검증 발견 (2차, 재점검): file:// 만 막고 http(s)://는 전부 허용하고 있어,
@@ -50,8 +48,38 @@ def _pdf_url_fetcher(url: str, *args, **kwargs):
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_FETCH_HOSTS:
         raise ValueError(f"보안: 허용되지 않은 외부 리소스 참조 차단됨 ({url[:60]})")
-    from weasyprint.urls import default_url_fetcher
-    return default_url_fetcher(url, *args, **kwargs)
+
+
+def _make_pdf_url_fetcher():
+    """weasyprint용 URL fetcher를 만든다 (위 _check_pdf_fetch_url로 허용목록 검증).
+
+    환경 비호환 발견(사용자 요청, 직접 실행해 재현): weasyprint 63+ 는
+    `url_fetcher`로 `callable(url) -> dict` 형태의 **함수**를 받던 옛 API를
+    버리고, `URLFetcher`를 상속해 `.fetch(url, headers=None)` 메서드를
+    오버라이드한 **인스턴스**를 요구하도록 바뀌었다. 옛 함수 형태
+    (`_pdf_url_fetcher(url, *args, **kwargs)`)를 설치된 weasyprint 70.0에
+    그대로 넘기면 `weasyprint.urls.fetch()` 내부가 `url_fetcher._fail_on_errors`
+    속성을 읽으려다 `AttributeError: 'function' object has no attribute
+    '_fail_on_errors'`로 PDF 생성 자체가 실패했다 — HTML 출력은 멀쩡해서
+    묻혀 있던 문제다. `URLFetcher`가 없는 구버전(함수 기반 API)에서도 그대로
+    동작하도록 두 세대 API를 모두 지원한다."""
+    try:
+        from weasyprint.urls import URLFetcher
+    except ImportError:
+        from weasyprint.urls import default_url_fetcher
+
+        def _legacy_fetcher(url, *args, **kwargs):
+            _check_pdf_fetch_url(url)
+            return default_url_fetcher(url, *args, **kwargs)
+
+        return _legacy_fetcher
+
+    class _AllowlistURLFetcher(URLFetcher):
+        def fetch(self, url, headers=None):
+            _check_pdf_fetch_url(url)
+            return super().fetch(url, headers)
+
+    return _AllowlistURLFetcher()
 
 
 # 보안 검증 발견 3연전(재검토, PR 리뷰): 정규식으로 손수 짠 태그/속성 경계
@@ -403,7 +431,7 @@ def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
 def render_pdf(md_text: str, out_path: pathlib.Path, title: str, accent: str, lang: str) -> None:
     from weasyprint import HTML
     HTML(string=build_html(md_text, title, accent, lang),
-         url_fetcher=_pdf_url_fetcher).write_pdf(str(out_path))
+         url_fetcher=_make_pdf_url_fetcher()).write_pdf(str(out_path))
 
 
 def render_html(md_text: str, out_path: pathlib.Path, title: str, accent: str, lang: str) -> None:

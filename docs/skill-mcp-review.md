@@ -1180,6 +1180,48 @@ PDF 렌더링은 §13.22에서 이미 기록한 환경 weasyprint 버전 비호�
 
 ---
 
+### 13.24 weasyprint 63+ URL fetcher API 변경 대응 — PDF 생성 복구 (render.py 공용, 2026-10-10)
+
+§13.22에서 "환경 이슈라 범위 밖"으로 미뤄뒀던 PDF 실패를 사용자가 "고쳐서
+확인해달라"고 명시적으로 요청해 원인을 끝까지 추적했다.
+
+**근본 원인**: `_pdf_url_fetcher(url, *args, **kwargs)`는 weasyprint의
+`url_fetcher`가 **함수**였던 옛 API(`callable(url) -> dict`)로 작성돼 있었다.
+그런데 이 환경에 설치된 weasyprint 70.0은 63 버전대 어딘가에서 API를 갈아엎어,
+`url_fetcher`로 `URLFetcher`를 상속해 `.fetch(url, headers=None)`를
+오버라이드한 **인스턴스**를 요구한다 — 내부 `weasyprint.urls.fetch()`가
+`url_fetcher._fail_on_errors` 속성을 읽으려다 함수 객체에는 그 속성이 없어
+`AttributeError`로 죽는다. `from weasyprint.urls import default_url_fetcher`도
+70.0에는 더 이상 없어 `ImportError`까지 겹쳐 있었다(직접 실행해 트레이스백으로
+확인). HTML 출력 경로는 이 코드를 안 거쳐서 멀쩡했기 때문에, §13.22까지
+PDF만 선택적으로 계속 깨져 있었던 것 — "HTML로 폴백"이 근본 수정을 가려온
+셈이다.
+
+**수정**: 허용목록 검증 로직(`_check_pdf_fetch_url`, 기존 `_pdf_url_fetcher`의
+핵심 — https + 알려진 폰트 호스트만 허용)은 그대로 떼어내 재사용하고,
+`_make_pdf_url_fetcher()`가 weasyprint 버전에 맞는 fetcher를 만들어 돌려준다:
+`URLFetcher`가 있으면(63+) 그걸 상속한 `_AllowlistURLFetcher.fetch()`가
+검증 후 `super().fetch()`로 위임하고, 없으면(구버전) 옛 함수 형태로 폴백한다
+— 설치된 weasyprint 버전과 무관하게 동작하도록 두 세대 API를 모두 지원한다.
+
+**보안 검증**: 이 교체가 SSRF/file:// 차단(§13의 원래 보안 수정)을 약화시키지
+않았는지 `_make_pdf_url_fetcher()`를 직접 호출해 확인 — `file:///etc/passwd`,
+`http://169.254.169.254/...`(클라우드 메타데이터), `https://evil.example/...`
+(허용되지 않은 https 호스트) 셋 다 네트워크 요청 전에 `ValueError`로 차단되고,
+허용 호스트(`fonts.gstatic.com`)는 검증을 통과해 실제 요청을 시도함(샌드박스
+네트워크 제약으로 그 다음 단계는 `HTTPError` — 검증 통과 자체는 확인됨)을
+재현 스크립트로 확인했다.
+
+검증: ai-support-bot PRD를 실제로 PDF로 생성(9페이지) — 1페이지가 배너+
+안내문+목차, 2페이지부터 "1. Overview"로 시작해 §13.23의 `h2:first-of-type`
+페이지 분할이 PDF에서 실제로 동작함을 확인. mock-shop·hybrid-demo 본문도
+PDF 생성 성공(회귀 없음). §13.18~13.21 재현 스크립트 전부 재통과.
+`examples/ai-support-bot-output/`의 공식 샘플을 PDF+HTML 쌍으로 갱신
+(mock-shop과 동일한 `_sample.{html,pdf}` 명명 규칙). `tools/check-sync.sh`·
+`py_compile` 통과.
+
+---
+
 ### 출처
 
 - https://code.claude.com/docs/en/skills.md (프론트매터 필드 표, 디렉토리 구조, `${CLAUDE_SKILL_DIR}`)
