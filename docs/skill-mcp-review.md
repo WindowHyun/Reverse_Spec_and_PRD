@@ -1070,6 +1070,70 @@ PRD`/`#1f4e79`/`ko`, 영문 제목/`red`/`en-US`, 공백 없는 `onclick=`, 일�
 
 ---
 
+### 13.22 AI PRD 체크리스트 반영 — 1-K AI/LLM 연동 감지 추가 (reverse-prd 전용, 2026-10-10)
+
+사용자가 "기존 PRD vs AI PRD" 비교표(완료기준/성공지표/변경관리/예외처리/
+검증방법 5축)를 보여주며 현재 스킬 위치를 물었다. 다섯 축 모두 코드
+사실만 다루는 결정적 추출 구조상 "기존 PRD" 쪽에 있다고 분석해 보고했고,
+사용자가 "역기획서니깐 어느 정도만 반영"이라는 전제와 함께 범위를 물어
+와 다음을 제안·합의했다: **완료기준(허용오차)·성공지표(품질지표)는
+코드에 숫자로 없는 인간 판단값이라 반영하면 또 다른 `[추정]`이 될 뿐이므로
+제외**하고, **변경관리/예외처리/검증방법 3축만, 코드에서 실제 증거가
+나오는 부분으로 한정**해 반영하기로 함. 사용자는 추가로 "모든 전제조건은
+허위사실이나 지어낸 내용이 아닌 데이터 기반으로 처리"를 명시적으로 요구함.
+
+구현 (`extract.py`, 1-K 신설):
+
+1. **AI/LLM SDK 의존성**: `package.json` dependencies/devDependencies를
+   allowlist(`AI_SDK_DEPS`/`AI_SDK_DEP_PREFIXES` — openai, @anthropic-ai/sdk,
+   langchain류, llamaindex, google/cohere/replicate/huggingface/mistral/groq/
+   ollama 등)와 정확히 일치하는 것만 보고. 기존 1-G `extract_integrations`의
+   "프레임워크 제외" 방식과 반대로 "AI SDK만 포함" 허용목록이라 오탐이 거의
+   없다.
+2. **모델 ID 리터럴**: `gpt-`/`claude-`/`gemini-`/`llama-`/`mistral-`/
+   `text-embedding-` 등 알려진 벤더 접두사 정규식으로 소스 문자열에 실제
+   등장한 리터럴만 그대로 수집(`_MODEL_ID_PATTERNS`) — 목록에 없는 벤더는
+   당연히 놓치며, 이는 추정하지 않는다는 원칙의 직접적 귀결이라 1-I에
+   한계로 명시.
+3. **프롬프트/eval 관련 파일**: 내용은 전혀 읽지 않고 **파일명 패턴만**
+   매칭(`_PROMPT_FILENAME`/`_EVAL_FILENAME`) — "발견했다"는 사실과 "그
+   파일이 실제로 무엇을 하는지"를 분리해, 후자는 LLM이 지어내지 못하게
+   SKILL.md에 "파일명 패턴 매칭 결과일 뿐, 용도는 보증하지 않음"이라고
+   못박았다.
+
+**구현 중 자체 발견한 버그**: 경계 정규식 `([_\-.]|$)`가 디렉토리 구분자
+`/`를 포함하지 않아, `src/prompts/system.ts`처럼 디렉토리명이 `prompts`인
+경우를 못 잡았다(파일명 끝에 `.`/`-`/`_`가 와야만 매칭). 실제 픽스처로
+재현(`src/prompts/system.ts`가 "해당 없음"으로 누락)한 뒤 `([_\-./]|$)`로
+고쳐 디렉토리 경계도 포함시켰다. 동시에 `PromptInput.tsx`/
+`evaluateDiscount.ts`/`retrieval.ts` 같은 일반 식별자는 여전히 매칭되지
+않음을 별도로 검증해, 경계 완화가 오탐을 늘리지 않았음을 확인했다.
+
+**지어내지 않기 원칙을 코드로 강제한 지점**: 1-K 발견이 없으면 facts.md에
+"AI/LLM 연동 감지된 항목 없음"을 명시적으로 쓴다(섹션 자체를 생략하지
+않음 — 1-G의 기존 관례와 동일). `reference.md`에 "반영 범위를 의도적으로
+좁혔다" 절을 추가해, 허용오차·품질지표 등 인간 판단값은 1-K가 **절대
+채우지 않고** PM 재정의가 필요하다는 교차검증 항목(12장)만 자동 추가하도록
+SKILL.md Step 3를 수정했다 — 9.4(AI/LLM 연동)·13.6(발견된 eval 체계)도
+"1-K에 발견이 있을 때만 작성"으로 조건부 처리해, 발견이 없는 평범한
+코드베이스의 PRD는 전과 동일하게 유지된다.
+
+범위: `reverse-prd/SKILL.md`만 AI PRD 목차를 반영(사용자 요청이
+"역기획서"로 한정). `extract.py`/`reference.md`는 두 스킬의 공유
+엔진이라 `reverse-spec`에도 자동으로 1-K가 생기지만, `reverse-spec/SKILL.md`
+는 건드리지 않아 정책서 산출물에는 영향이 없다(check-sync.sh 대상이
+SKILL.md를 포함하지 않는 기존 관례와 일치).
+
+검증: AI 연동 픽스처(openai+@langchain/core 의존성, gpt-4o-mini/
+claude-3-5-sonnet 리터럴, src/prompts/system.ts, src/evals/golden.eval.ts)로
+1-K 전 항목이 사실 그대로(가공 없이) 집계됨을 확인. mock-shop(AI 미사용)
+재실행 결과 1-K가 "감지된 항목 없음"으로 올바르게 비어 있고, 기존 베이스라인
+(라우트 8·API 2·규칙 6)과 2회 연속 해시가 그대로 유지됨을 확인(결정성
+불변). §13.18~13.21의 모든 재현 스크립트(round18/19/20/review1) 재실행 —
+전부 여전히 통과, 회귀 없음. `tools/check-sync.sh`·`py_compile` 통과.
+
+---
+
 ### 출처
 
 - https://code.claude.com/docs/en/skills.md (프론트매터 필드 표, 디렉토리 구조, `${CLAUDE_SKILL_DIR}`)

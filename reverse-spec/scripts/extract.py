@@ -14,7 +14,7 @@ reference.md의 1-A~1-H 추출 규칙을 파서(정규식)로 구현한다. LLM 
   python extract.py <대상경로> --output facts.md [--emit-flow flow.json]
 
 출력:
-  facts.md   : 1-A~1-H, 1-J 사실 표 (Markdown) — 문서의 사실 계층에 그대로 사용
+  facts.md   : 1-A~1-H, 1-J, 1-K 사실 표 (Markdown) — 문서의 사실 계층에 그대로 사용
   flow.json  : (선택) flowgen.py 입력용 흐름도 스켈레톤 — LLM이 라벨/점선 보강 후 사용
 """
 import argparse
@@ -62,6 +62,36 @@ TRACKING_PATTERNS = [
     (r"\bdataLayer\.push\(\s*\{[^}]*event\s*:\s*['\"]([^'\"]+)['\"]", "dataLayer"),
     (r"\b(?:track|logEvent|trackEvent)\(\s*['\"]([^'\"]+)['\"]", "custom"),
 ]
+
+# AI PRD 체크리스트(완료기준 허용오차·품질지표·모델변경 재검증·eval 기반 검증) 중,
+# 코드에서 직접 증거를 뽑을 수 있는 항목만 1-K로 반영한다: SDK 의존성·모델ID
+# 리터럴·프롬프트/평가 관련 파일 "존재 여부"만. 허용오차·품질지표 같은 값은
+# 코드에 적혀있지 않은 인간 판단값이므로 절대 추정하지 않는다 — 감지되면
+# reverse-prd SKILL.md가 "PM 재정의 필요" 교차검증 항목으로만 안내한다.
+AI_SDK_DEPS = {
+    "openai", "@anthropic-ai/sdk", "langchain", "llamaindex",
+    "@google/generative-ai", "@google-cloud/vertexai", "cohere-ai",
+    "replicate", "@huggingface/inference", "mistralai", "groq-sdk",
+    "ai", "ollama", "@xenova/transformers", "@azure/openai",
+}
+AI_SDK_DEP_PREFIXES = ("@langchain/",)
+
+# 알려진 모델 패밀리 접두사만 매칭 — 목록에 없는 벤더/신규 모델은 놓칠 수 있다
+# (reference.md 1-I에 한계로 명시). 코드 문자열에 실제로 등장한 리터럴만
+# 그대로 보고하고 의미를 해석하지 않는다.
+_MODEL_ID_PATTERNS = [
+    (r"\bgpt-(?:3\.5|4o?|4\.1|5)(?:-[a-z0-9.\-]+)?\b", "OpenAI"),
+    (r"\btext-embedding-(?:ada|3)[a-z0-9.\-]*\b", "OpenAI"),
+    (r"\bclaude-(?:3|3-5|3\.5|4|5)(?:-[a-z0-9.\-]+)?\b", "Anthropic"),
+    (r"\bgemini-(?:1\.0|1\.5|2\.0|2\.5)(?:-[a-z0-9.\-]+)?\b", "Google"),
+    (r"\bllama-?[23](?:\.[0-9])?(?:-[a-z0-9.\-]+)?\b", "Meta"),
+    (r"\bmistral-(?:tiny|small|medium|large)(?:-[a-z0-9.\-]+)?\b", "Mistral"),
+]
+
+# 파일명 패턴 매칭만 수행 — 내용은 읽지 않으므로 실제 용도는 보증하지 않는다
+# (예: PromptInput.tsx 같은 평범한 컴포넌트명은 경계 조건상 매칭되지 않는다).
+_PROMPT_FILENAME = re.compile(r"(?i)(^|[_\-./])prompts?([_\-./]|$)")
+_EVAL_FILENAME = re.compile(r"(?i)(^|[_\-./])(eval|evals|golden|benchmark)([_\-./]|$)")
 
 
 _TRAILING_COMMENT = re.compile(r"\s//")
@@ -1351,6 +1381,50 @@ def extract_integrations(files: dict) -> dict:
     return {"third_party_deps": deps, "tracking": tracking}
 
 
+# ── 1-K. AI/LLM 연동 감지 (change-management 근거) ──────────────
+
+def extract_ai_signals(root: pathlib.Path, files: dict) -> dict:
+    """AI PRD의 변경관리/예외처리/검증방법 축 중 코드에서 증거가 나오는 부분만
+    반영한다. SDK 의존성과 모델ID 리터럴은 코드 내용에서, 프롬프트/eval 관련
+    파일은 파일명 패턴에서만 찾는다 — 전부 사실 그대로 보고하고 해석(목적·
+    허용오차·품질기준)은 덧붙이지 않는다."""
+    sdk_deps = []
+    pkg = files.get("package.json")
+    if pkg:
+        try:
+            data = json.loads(pkg)
+            all_deps = {**data.get("dependencies", {}), **data.get("devDependencies", {})}
+            for d in sorted(all_deps):
+                if d in AI_SDK_DEPS or d.startswith(AI_SDK_DEP_PREFIXES):
+                    sdk_deps.append({"name": d, "source": "package.json"})
+        except json.JSONDecodeError:
+            pass
+
+    model_literals = []
+    for fname, src in files.items():
+        if fname == "package.json":
+            continue
+        for pattern, vendor in _MODEL_ID_PATTERNS:
+            for m in re.finditer(pattern, src):
+                model_literals.append({"literal": m.group(0), "vendor": vendor, "source": fname})
+    model_literals = sorted(
+        {(m["literal"], m["source"]): m for m in model_literals}.values(),
+        key=lambda m: (m["vendor"], m["literal"], m["source"]))
+
+    prompt_files, eval_files = [], []
+    for p in _walk_safe_files(root):
+        if any(part in ("node_modules", ".git", "dist", "build") for part in p.parts):
+            continue
+        rel = str(p.relative_to(root))
+        if _PROMPT_FILENAME.search(rel):
+            prompt_files.append(rel)
+        if _EVAL_FILENAME.search(rel):
+            eval_files.append(rel)
+
+    return {"sdk_deps": sdk_deps, "model_literals": list(model_literals),
+            "prompt_files": sorted(prompt_files), "eval_files": sorted(eval_files)}
+
+
 # ── 1-H. As-Is 스냅샷 ────────────────────────────────────────
 
 def extract_snapshot(root: pathlib.Path, files: dict) -> dict:
@@ -1459,7 +1533,7 @@ def guard_label(g: str) -> str:
 
 
 def build_facts_md(root, routes, comps, apis, consts, rules, trans, msgs, state,
-                   integ, snap, secrets) -> str:
+                   integ, snap, secrets, ai_signals) -> str:
     s = ["<!-- scripts/extract.py 출력 — 결정적 사실 계층. LLM은 이 표를 근거로만 해석한다. -->",
          ""]
     if secrets:
@@ -1519,10 +1593,36 @@ def build_facts_md(root, routes, comps, apis, consts, rules, trans, msgs, state,
                   [[t["event"], t["tool"], f'`{t["source"]}`'] for t in integ["tracking"]])
          if integ["tracking"]
          else "트래킹 호출: **[정보 없음 — 트래킹 미구현 또는 서버 측]**",
-         "",
-         f"<!-- 추출 통계: 라우트 {len(routes)} · 컴포넌트 {len(comps)} · API {len(apis)} · "
+         "", "## 1-K. AI/LLM 연동 감지", ""]
+    any_ai = (ai_signals["sdk_deps"] or ai_signals["model_literals"]
+              or ai_signals["prompt_files"] or ai_signals["eval_files"])
+    if any_ai:
+        s += [
+            ("AI/LLM SDK 의존성: " + (", ".join(f"`{d['name']}`" for d in ai_signals["sdk_deps"]))
+             if ai_signals["sdk_deps"] else "AI/LLM SDK 의존성: **해당 없음**"),
+            "",
+            md_table(["모델 ID 리터럴", "추정 벤더", "근거 파일"],
+                     [[f'`{m["literal"]}`', m["vendor"], f'`{m["source"]}`']
+                      for m in ai_signals["model_literals"]])
+            if ai_signals["model_literals"] else "모델 ID 리터럴: **해당 없음**",
+            "",
+            ("프롬프트 관련 파일(파일명 패턴만, 내용 미해석): "
+             + ", ".join(f"`{p}`" for p in ai_signals["prompt_files"]))
+            if ai_signals["prompt_files"] else "프롬프트 관련 파일: **해당 없음**",
+            "",
+            ("평가(eval) 관련 파일(파일명 패턴만, 내용 미해석): "
+             + ", ".join(f"`{p}`" for p in ai_signals["eval_files"]))
+            if ai_signals["eval_files"] else "평가(eval) 관련 파일: **해당 없음**",
+            "",
+        ]
+    else:
+        s += ["AI/LLM 연동 감지된 항목 없음 (SDK 의존성·모델ID 리터럴·"
+              "프롬프트/eval 파일명 패턴 전부 미발견).", ""]
+    s += [f"<!-- 추출 통계: 라우트 {len(routes)} · 컴포넌트 {len(comps)} · API {len(apis)} · "
          f"상수 {len(consts)} · 규칙 {len(rules)} · 전환 {len(trans)} · 문구 {len(msgs)} · "
-         f"상태 {len(state)} · 트래킹 {len(integ['tracking'])} -->"]
+         f"상태 {len(state)} · 트래킹 {len(integ['tracking'])} · "
+         f"AI연동(SDK {len(ai_signals['sdk_deps'])}/모델ID {len(ai_signals['model_literals'])}/"
+         f"프롬프트파일 {len(ai_signals['prompt_files'])}/eval파일 {len(ai_signals['eval_files'])}) -->"]
     return "\n".join(s) + "\n"
 
 
@@ -1594,9 +1694,10 @@ def main() -> int:
     integ = extract_integrations(files)
     snap = extract_snapshot(root, files)
     secrets = extract_secret_findings(root)
+    ai_signals = extract_ai_signals(root, files)
 
     md = build_facts_md(root, routes, comps, apis, consts, rules, trans, msgs,
-                        state, integ, snap, secrets)
+                        state, integ, snap, secrets, ai_signals)
     if args.output:
         pathlib.Path(args.output).write_text(md, encoding="utf-8")
         print(f"✅ 사실 표 생성 완료: {args.output}", file=sys.stderr)
