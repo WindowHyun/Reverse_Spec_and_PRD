@@ -269,6 +269,52 @@ def _css_dquote_escape(value: str) -> str:
     return value
 
 
+def _insert_toc_marker(md_text: str) -> str:
+    """실무 가독성 개선: `toc` 확장은 이미 로드돼 있었지만 본문에 `[TOC]` 마커가
+    없으면 아무것도 렌더링하지 않아 목차가 비어 있었다. Step 3에서 LLM이 매번
+    마커를 기억해 써야 하는 구조는 깨지기 쉬우므로, render.py가 구조적으로
+    "제목/안내문 다음, 첫 `## ` 장 시작 직전"에 자동 삽입한다(skill 작성
+    규칙에 의존하지 않음 — reverse-prd/reverse-spec 공용으로 동일하게 적용)."""
+    idx = md_text.find("\n## ")
+    if idx == -1:
+        return "[TOC]\n\n" + md_text
+    return md_text[:idx] + "\n\n[TOC]\n" + md_text[idx:]
+
+
+_BADGE_PATTERNS = [
+    (re.compile(r"\[추정\]"), lambda m: '<span class="badge badge-assumed">추정</span>'),
+    (re.compile(r"\[정보 없음(?:\s*—\s*[^\]]*)?\]"),
+     lambda m: f'<span class="badge badge-unknown">{m.group(0)[1:-1]}</span>'),
+    (re.compile(r"\[파서 미탐지 — 수동 확인\]"),
+     lambda m: '<span class="badge badge-assumed">파서 미탐지 — 수동 확인</span>'),
+]
+# 보호등급 셀은 `공개`/`🔒 ...`가 표 셀 전체일 때만 매칭 — "공개"는 평범한
+# 단어라 본문 중 임의 등장까지 배지로 바꾸면 의미가 다른 문장을 오염시킨다.
+_GUARD_CELL = re.compile(r"(<td[^>]*>)\s*(공개|🔒\s*[^<]{0,24}?)\s*(</td>)")
+
+
+def _badge_guard_cell(m: "re.Match") -> str:
+    open_td, label, close_td = m.group(1), m.group(2), m.group(3)
+    cls = "badge-public" if label == "공개" else "badge-protected"
+    return f'{open_td}<span class="badge {cls}">{label}</span>{close_td}'
+
+
+def _apply_badges(html_text: str) -> str:
+    """실무 가독성 개선: `[추정]`/`[정보 없음 ...]`/보호등급(공개·🔒)이 평문이라
+    표를 훑을 때 눈에 안 띈다는 지적(실무 사용성 리뷰) — 배지(badge) 스타일로
+    시각화한다. `<pre>` 코드 블록 내부는 건드리지 않는다(예시 코드에 우연히
+    같은 문구가 있어도 변형하지 않기 위해 — 기존 sanitizer와 같은 defense-in-
+    depth 관례로, 짝수 인덱스만 치환해 <pre> 블록을 건너뛴다)."""
+    parts = re.split(r"(<pre[\s\S]*?</pre>)", html_text)
+    for i in range(0, len(parts), 2):
+        seg = parts[i]
+        for pat, repl in _BADGE_PATTERNS:
+            seg = pat.sub(repl, seg)
+        seg = _GUARD_CELL.sub(_badge_guard_cell, seg)
+        parts[i] = seg
+    return "".join(parts)
+
+
 def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
     import markdown
     # 코드 리뷰 발견(자체 재검토): 이 함수는 본문(md_text)만 _sanitize_html_fragment로
@@ -283,23 +329,36 @@ def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
     lang_attr = html.escape(lang, quote=True)
     # python-markdown 코어에 취소선(~~text~~)이 없어 <del>로 선치환 (HTML/PDF 공통)
     md_text = re.sub(r"~~(.+?)~~", r"<del>\1</del>", md_text)
-    body = markdown.markdown(md_text, extensions=["tables", "toc", "fenced_code"])
+    md_text = _insert_toc_marker(md_text)
+    body = markdown.markdown(md_text, extensions=["tables", "toc", "fenced_code"],
+                             extension_configs={"toc": {"toc_depth": "2-3", "title": "목차"}})
     body = _sanitize_html_fragment(body)
+    # 배지는 반드시 sanitizer 통과 *이후*에 입힌다 — 여기서 만드는 <span class="badge ...">는
+    # 코드가 직접 쓰는 고정 문자열뿐이라 새 입력 경로를 만들지 않는다(accent/lang/title과
+    # 달리 외부에서 값을 주입할 지점이 없음).
+    body = _apply_badges(body)
     return f"""<!DOCTYPE html>
 <html lang="{lang_attr}">
 <head>
 <meta charset="UTF-8">
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&display=swap');
-  body {{ font-family: 'Noto Sans KR', sans-serif; font-size: 11pt; line-height: 1.8;
+  body {{ font-family: 'Noto Sans KR', sans-serif; font-size: 11pt; line-height: 1.7;
           color: #1a1a1a; margin: 0; padding: 0; }}
-  h1 {{ font-size: 20pt; border-bottom: 2px solid {accent}; padding-bottom: 8px;
-        margin-top: 40px; color: {accent}; }}
-  h2 {{ font-size: 15pt; border-left: 4px solid {accent}; padding-left: 10px; margin-top: 30px; }}
+  /* 표지 배너 — 문서의 유일한 h1을 큰 색상 카드로 올려 "표지"처럼 보이게 한다.
+     커버만을 위한 별도 입력값(로고·부제 등)을 새로 받지 않는다 — 이미 검증된
+     accent/title만 재사용해 새 이스케이프 지점을 만들지 않는다. */
+  h1 {{ font-size: 22pt; text-align: center; color: #ffffff; background: {accent};
+        padding: 26px 24px; margin: 0 0 22px; border-radius: 10px; }}
+  h2 {{ font-size: 15pt; border-left: 4px solid {accent}; padding-left: 10px; margin-top: 34px; }}
   h3 {{ font-size: 12pt; color: #444; margin-top: 20px; }}
+  /* 표지 바로 다음 장(1장)부터 PDF에서 새 페이지로 시작 — 배너+안내문+목차가
+     사실상의 "1페이지 표지" 역할을 한다. 화면(HTML)에서는 인쇄 시에만 적용되고
+     평소 스크롤 보기에는 영향 없다. */
+  h2:first-of-type {{ page-break-before: always; }}
   table {{ width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 10pt; }}
   th {{ background: {accent}; color: white; padding: 8px 12px; text-align: left; }}
-  td {{ border: 1px solid #ccc; padding: 7px 12px; vertical-align: top; }}
+  td {{ border: 1px solid #dde3e9; padding: 7px 12px; vertical-align: top; }}
   tr:nth-child(even) td {{ background: #f5f7fa; }}
   code {{ background: #eef2f7; padding: 2px 5px; border-radius: 3px; font-size: 9.5pt; }}
   pre {{ background: #1e1e1e; color: #d4d4d4; padding: 14px; border-radius: 6px;
@@ -307,9 +366,25 @@ def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
   pre code {{ background: transparent; color: inherit; padding: 0; }}
   blockquote {{ border-left: 4px solid #c47a00; background:#fff8ec; margin:16px 0;
                padding:8px 16px; color:#7a5200; }}
+  /* 자동 목차 ([TOC] 마커는 render.py가 본문에 직접 삽입 — build_html 참조) */
+  .toc {{ background: #f4f6f8; border: 1px solid #dde3e9; border-radius: 8px;
+          padding: 14px 22px; margin: 0 0 20px; }}
+  .toc .toctitle {{ font-weight: 700; font-size: 11pt; color: {accent}; }}
+  .toc ul {{ list-style: none; padding-left: 14px; margin: 6px 0; }}
+  .toc ul ul {{ padding-left: 18px; }}
+  .toc li {{ margin: 3px 0; }}
+  .toc a {{ color: #41505c; text-decoration: none; font-size: 10pt; }}
+  /* 상태 배지 — [추정]/[정보 없음 ...]/보호등급을 평문 대신 한눈에 띄는 pill로
+     표시한다(실무 가독성 개선 — build_html의 _apply_badges 참조). */
+  .badge {{ display: inline-block; padding: 1px 9px; border-radius: 10px;
+            font-size: 9pt; font-weight: 700; line-height: 1.5; }}
+  .badge-assumed {{ background: #fdf1e2; color: #8a5a00; border: 1px solid #e8c383; }}
+  .badge-unknown {{ background: #fdeaea; color: #a12b2b; border: 1px solid #eeb3b3; }}
+  .badge-protected {{ background: #e8f0fa; color: {accent}; border: 1px solid #b8cfe8; }}
+  .badge-public {{ background: #eef2f3; color: #51606b; border: 1px solid #cdd6dc; }}
   /* 브라우저 화면 전용 여백 — weasyprint(PDF)는 print 매체라 무시하고 @page 여백을 쓴다 */
   @media screen {{
-    body {{ max-width: 860px; margin: 0 auto; padding: 32px 24px; }}
+    body {{ max-width: 880px; margin: 0 auto; padding: 32px 24px; }}
   }}
   @page {{
     size: A4;
