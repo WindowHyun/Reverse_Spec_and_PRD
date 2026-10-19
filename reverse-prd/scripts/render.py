@@ -136,6 +136,23 @@ _VOID_ELEMENTS = {
     # 영원히 안 풀리는 것을 방지한다.
     "animate", "set", "animatemotion", "animatetransform",
 }
+# 코드 리뷰 발견(PR 리뷰): html.parser.HTMLParser는 HTML이 대소문자를 구분하지
+# 않는다는 전제로 속성명을 *토크나이저 단계에서* 전부 소문자화한다(우리 코드가
+# 손댈 수 있는 지점보다 앞). 그런데 flowgen.py가 본문에 인라인으로 꽂는 SVG는
+# XML이라 대소문자를 구분하므로 `viewBox`→`viewbox`, `refX`→`refX`가 아니라
+# `refx`처럼 깨지면 브라우저/PDF 엔진이 그 속성을 아예 인식 못 한다 — 실제로
+# 커밋된 PDF를 렌더링해서 사용자 여정 다이어그램의 박스·화살표가 통째로
+# 사라지는 걸 확인했다. flowgen.py가 실제로 쓰는 속성만, 소문자→정식 표기로
+# 복원하는 좁은 허용목록으로 되돌린다(값에 신뢰 못 할 텍스트가 들어가는 속성이
+# 아니라 고정 템플릿/숫자 레이아웃 값만 담는 속성들이라 이름을 되돌려도 새
+# 위험이 생기지 않는다).
+_SVG_ATTR_CASE_FIX = {
+    "viewbox": "viewBox",
+    "refx": "refX",
+    "refy": "refY",
+    "markerwidth": "markerWidth",
+    "markerheight": "markerHeight",
+}
 
 
 def _has_dangerous_scheme(value: str) -> bool:
@@ -183,7 +200,7 @@ class _HtmlSanitizer(HTMLParser):
                 continue
             if nl in _URL_ATTRS and _has_dangerous_scheme(value):
                 value = "blocked:" + value
-            cleaned.append((name, value))
+            cleaned.append((_SVG_ATTR_CASE_FIX.get(nl, name), value))
         self.out.append(self._serialize(tag, cleaned, self_closing))
 
     @staticmethod
@@ -302,11 +319,34 @@ def _insert_toc_marker(md_text: str) -> str:
     없으면 아무것도 렌더링하지 않아 목차가 비어 있었다. Step 3에서 LLM이 매번
     마커를 기억해 써야 하는 구조는 깨지기 쉬우므로, render.py가 구조적으로
     "제목/안내문 다음, 첫 `## ` 장 시작 직전"에 자동 삽입한다(skill 작성
-    규칙에 의존하지 않음 — reverse-prd/reverse-spec 공용으로 동일하게 적용)."""
-    idx = md_text.find("\n## ")
-    if idx == -1:
+    규칙에 의존하지 않음 — reverse-prd/reverse-spec 공용으로 동일하게 적용).
+
+    코드 리뷰 발견(PR 리뷰, 직접 재현): 원래는 `md_text.find("\\n## ")`로
+    문서 전체에서 첫 매치를 찾았는데, 코드펜스(```/~~~) 안에 "## "로 시작하는
+    줄(예: 셸 스크립트 안의 `## comment`)이 1장 헤딩보다 먼저 나오면 그걸
+    진짜 헤딩으로 착각해 펜스 한가운데 `[TOC]`를 끼워넣어 코드블록을 둘로
+    쪼갰다 — 펜스 내부는 건너뛰고, 펜스 밖에서 줄 맨 앞이 `## `인 첫 줄만
+    찾는다."""
+    lines = md_text.split("\n")
+    in_fence = False
+    fence_marker = ""
+    offset = 0
+    insert_at = None
+    for line in lines:
+        stripped = line.lstrip()
+        if in_fence:
+            if stripped.startswith(fence_marker):
+                in_fence = False
+        elif stripped[:3] in ("```", "~~~"):
+            in_fence = True
+            fence_marker = stripped[:3]
+        elif line.startswith("## "):
+            insert_at = offset
+            break
+        offset += len(line) + 1
+    if insert_at is None:
         return "[TOC]\n\n" + md_text
-    return md_text[:idx] + "\n\n[TOC]\n" + md_text[idx:]
+    return md_text[:insert_at] + "[TOC]\n\n" + md_text[insert_at:]
 
 
 _BADGE_PATTERNS = [
@@ -332,8 +372,17 @@ def _apply_badges(html_text: str) -> str:
     표를 훑을 때 눈에 안 띈다는 지적(실무 사용성 리뷰) — 배지(badge) 스타일로
     시각화한다. `<pre>` 코드 블록 내부는 건드리지 않는다(예시 코드에 우연히
     같은 문구가 있어도 변형하지 않기 위해 — 기존 sanitizer와 같은 defense-in-
-    depth 관례로, 짝수 인덱스만 치환해 <pre> 블록을 건너뛴다)."""
-    parts = re.split(r"(<pre[\s\S]*?</pre>)", html_text)
+    depth 관례로, 짝수 인덱스만 치환해 <pre> 블록을 건너뛴다).
+
+    코드 리뷰 발견(PR 리뷰, 직접 재현): `<pre>`만 건너뛰고 `<svg>`는 안
+    건너뛰어서, flowgen.py가 만든 다이어그램의 `<text>[추정] ...</text>`
+    안에까지 `<span class="badge...">`를 끼워넣었다. HTML5 파싱 규칙상
+    `span`은 SVG(foreign content) 안에 나오면 그 지점에서 SVG 트리를
+    통째로 빠져나가 버리는 "breakout" 태그라, 그 뒤에 나오는 `<rect>`
+    노드 박스들이 전부 `<svg>` 밖으로 밀려나 렌더링 자체가 안 됐다(PDF를
+    직접 렌더링해 사용자 여정 다이어그램의 박스가 통째로 사라지는 것으로
+    확인). `<pre>`와 같은 방식으로 `<svg>...</svg>` 구간도 건너뛴다."""
+    parts = re.split(r"(<pre[\s\S]*?</pre>|<svg[\s\S]*?</svg>)", html_text)
     for i in range(0, len(parts), 2):
         seg = parts[i]
         for pat, repl in _BADGE_PATTERNS:
