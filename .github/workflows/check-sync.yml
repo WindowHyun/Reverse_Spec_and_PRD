@@ -1,0 +1,23 @@
+name: check-sync
+
+# reverse-prd/reverse-spec는 ${CLAUDE_SKILL_DIR}가 스킬 자기 디렉토리 밖을
+# 참조 못 하는 제약 때문에 scripts/*.py·reference.md를 바이트 단위로 동일한
+# 두 사본으로 유지한다(tools/check-sync.sh). 지금까지는 "커밋 전에 수동으로
+# 돌려야 하는 안전장치"라 깜빡하면 두 스킬이 조용히 어긋날 수 있었다 — 그걸
+# push/PR마다 자동으로 잡아내도록 CI에 올린다.
+on:
+  push:
+  pull_request:
+
+jobs:
+  check-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check-sync.sh (reverse-prd/reverse-spec 공유 파일 동일성 검증)
+        run: bash tools/check-sync.sh
+      - name: py_compile (스크립트 구문 점검)
+        run: |
+          python3 -m py_compile \
+            reverse-prd/scripts/extract.py reverse-prd/scripts/render.py reverse-prd/scripts/flowgen.py \
+            reverse-spec/scripts/extract.py reverse-spec/scripts/render.py reverse-spec/scripts/flowgen.py

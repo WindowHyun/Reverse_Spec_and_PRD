@@ -1,0 +1,13 @@
+{
+  "nodes": [
+    { "id": "root", "label": "홈 /", "guard": "public" },
+    { "id": "login", "label": "로그인 /login", "guard": "public" },
+    { "id": "chat", "label": "AI 상담 /chat", "guard": "login" },
+    { "id": "admin_evals", "label": "eval 리포트 /admin/evals", "guard": "admin" }
+  ],
+  "edges": [
+    { "from": "root", "to": "login", "label": "[추정] 로그인하고 상담 시작하기 클릭", "dashed": true },
+    { "from": "login", "to": "chat", "label": "로그인 완료 (navigate)" }
+  ],
+  "entry": ["root"]
+}

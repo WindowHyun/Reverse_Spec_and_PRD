@@ -22,42 +22,420 @@ allowed-tools 를 `Bash(python ${CLAUDE_SKILL_DIR}/scripts/*)` 로 좁힐 수 �
 """
 import argparse
 import datetime
+import html
 import pathlib
 import re
 import sys
+import urllib.parse
+from html.parser import HTMLParser
+
+# PDF 렌더링 중 실제로 외부에서 가져올 필요가 있는 리소스는 구글 폰트뿐이다.
+# 그 외 호스트/스킴을 전부 막아 SSRF(내부망·클라우드 메타데이터 주소 접근) 표면을
+# "file:// 차단"보다 넓게 차단한다 — 분석 대상 코드에서 뽑아낸 문구가 이스케이프
+# 없이 본문에 섞여 `<img src="http://169.254.169.254/...">` 같은 태그가 되더라도
+# 이 fetcher가 요청 자체를 거부한다.
+_ALLOWED_FETCH_HOSTS = {"fonts.googleapis.com", "fonts.gstatic.com"}
 
 
-def _pdf_url_fetcher(url: str, *args, **kwargs):
-    """weasyprint용 URL fetcher. 보안 검증 발견: 기본 fetcher가 file:// 스킴을
-    그대로 가져와, 분석 대상이 통제 못하는 문서에 `<link href="file:///etc/passwd">`
-    같은 참조가 있으면 로컬 파일을 읽어 PDF에 임베드할 수 있었다(정보 노출).
-    file:/ 로컬 파일 스킴은 차단하고, 그 외(https 웹폰트 등)만 기본 처리한다."""
-    from weasyprint.urls import default_url_fetcher
-    if url.lower().startswith("file:"):
-        raise ValueError(f"보안: 로컬 파일 참조 차단됨 ({url[:40]})")
-    return default_url_fetcher(url, *args, **kwargs)
+def _check_pdf_fetch_url(url: str) -> None:
+    """보안 검증 발견 (1차): 기본 fetcher가 file:// 스킴을 그대로 가져와, 분석 대상이
+    통제 못하는 문서에 `<link href="file:///etc/passwd">` 같은 참조가 있으면 로컬
+    파일을 읽어 PDF에 임베드할 수 있었다(정보 노출).
+    보안 검증 발견 (2차, 재점검): file:// 만 막고 http(s)://는 전부 허용하고 있어,
+    SSRF로 내부망/클라우드 메타데이터 엔드포인트(예: http://169.254.169.254/...)에
+    접근할 수 있는 여지가 남아 있었다. https + 알려진 폰트 호스트만 허용하는
+    화이트리스트로 좁힌다(그 외 스킴·호스트는 전부 거부)."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_FETCH_HOSTS:
+        raise ValueError(f"보안: 허용되지 않은 외부 리소스 참조 차단됨 ({url[:60]})")
+
+
+def _make_pdf_url_fetcher():
+    """weasyprint용 URL fetcher를 만든다 (위 _check_pdf_fetch_url로 허용목록 검증).
+
+    환경 비호환 발견(사용자 요청, 직접 실행해 재현): weasyprint 63+ 는
+    `url_fetcher`로 `callable(url) -> dict` 형태의 **함수**를 받던 옛 API를
+    버리고, `URLFetcher`를 상속해 `.fetch(url, headers=None)` 메서드를
+    오버라이드한 **인스턴스**를 요구하도록 바뀌었다. 옛 함수 형태
+    (`_pdf_url_fetcher(url, *args, **kwargs)`)를 설치된 weasyprint 70.0에
+    그대로 넘기면 `weasyprint.urls.fetch()` 내부가 `url_fetcher._fail_on_errors`
+    속성을 읽으려다 `AttributeError: 'function' object has no attribute
+    '_fail_on_errors'`로 PDF 생성 자체가 실패했다 — HTML 출력은 멀쩡해서
+    묻혀 있던 문제다. `URLFetcher`가 없는 구버전(함수 기반 API)에서도 그대로
+    동작하도록 두 세대 API를 모두 지원한다."""
+    try:
+        from weasyprint.urls import URLFetcher
+    except ImportError:
+        from weasyprint.urls import default_url_fetcher
+
+        def _legacy_fetcher(url, *args, **kwargs):
+            _check_pdf_fetch_url(url)
+            return default_url_fetcher(url, *args, **kwargs)
+
+        return _legacy_fetcher
+
+    class _AllowlistURLFetcher(URLFetcher):
+        def fetch(self, url, headers=None):
+            _check_pdf_fetch_url(url)
+            return super().fetch(url, headers)
+
+    return _AllowlistURLFetcher()
+
+
+# 보안 검증 발견 3연전(재검토, PR 리뷰): 정규식으로 손수 짠 태그/속성 경계
+# 탐지는 세 차례 연속으로 우회가 나왔다 —
+#   1) 여는/닫는 태그를 통째로 페어 매칭(`.*?`)하면 안 닫히는 <script> 반복에서
+#      초선형 백트래킹(1,000회 반복만으로 10초+ CPU DoS).
+#   2) 그래서 태그를 "개별적으로 다음 `>`까지"로 바꿨더니, `>`가 전혀 없는
+#      <script 접두어가 대량 반복될 때 매 시작 위치마다 나머지 문서 끝까지
+#      스캔하다 실패하는 패턴이 남아 여전히 이차식으로 느렸다(32,000회 반복 ~4.6초).
+#   3) `[^<>]*`로 태그 경계를 잡으면 `<img title=">" onerror=...>`처럼 따옴표
+#      속성값 안의 리터럴 `>`에서 태그가 조기 종료돼 onerror가 경계 밖으로
+#      빠져나갔고, HTML 문자 참조(`&#x61;script:`)로 인코딩한 스킴은 브라우저는
+#      디코딩해서 실행하지만 리터럴 문자열 매칭 정규식은 못 잡았다.
+# 세 문제 모두 "정규식으로 태그 경계/인용부호/엔티티를 직접 흉내 내려 한 것"이
+# 근본 원인이라, 표준 라이브러리의 실제 HTML 토크나이저(html.parser.HTMLParser —
+# 신규 의존성 없음, 단일 패스로 선형 동작, 인용부호·엔티티를 스펙대로 처리)로
+# 교체했다. 위험 태그(및 그 내용)는 통째로 버리고, 남는 태그는 이벤트 속성 제거·
+# URL 스킴 정규화 후 재직렬화한다.
+# 보안 검증 발견(PR 리뷰, 5차): SVG 애니메이션 요소(`<animate>`, `<set>` 등)는
+# `attributeName="href"` + `values="javascript:..."` 조합으로 href 같은 속성값을
+# *간접적으로* 주입할 수 있어, href/src 등 이름으로만 검사하는 방식을 완전히
+# 우회한다 — 속성 이름/값 조합을 흉내 내 막기보다, 이 요소들 자체를 위험 태그로
+# 취급해 통째로 제거한다.
+# 보안 검증 발견(PR 리뷰, 6차): `<meta http-equiv="refresh" content="0;url=…">`는
+# href/src류 속성이 전혀 없이 `content` 값만으로 리더를 공격자 페이지로 즉시
+# 리다이렉트시킨다 — URL 속성 검사로는 원천적으로 못 잡는 패턴이라 `meta` 자체를
+# 위험 태그로 취급해 제거한다(HTML void 요소라 `_VOID_ELEMENTS`에도 이미 있음).
+# 코드 리뷰 발견(자체 재검토): `<base href="https://evil.example/">`는 `base`가
+# `_DANGEROUS_TAG_NAMES`에 없어 그대로 통과했다 — href는 `_URL_ATTRS`에 걸리지만
+# `_has_dangerous_scheme`는 javascript:/vbscript:/data:text/html만 막아 평범한
+# https:// 호스트는 차단하지 않는다. `<base>`는 문서의 모든 상대경로 링크/이미지/
+# 스타일시트의 기준 URL을 바꿔버리므로, 정상 https URL이어도 그 자체로 위험해
+# meta/animate와 같은 이유로 통째로 제거한다(이미 `_VOID_ELEMENTS`에도 있음).
+_DANGEROUS_TAG_NAMES = {
+    "script", "iframe", "object", "embed", "style", "link", "meta", "base",
+    "animate", "set", "animatemotion", "animatetransform",
+}
+# 보안 검증 발견(PR 리뷰, 4차): href/src만 스킴을 검사해 <form action="javascript:...">,
+# formaction, SVG xlink:href 같은 다른 내비게이션 속성은 그대로 통과했다 — URL을
+# 담을 수 있는 속성을 폭넓게 검사한다.
+_URL_ATTRS = {"href", "src", "action", "formaction", "xlink:href", "poster", "background"}
+_CONTROL_CHARS = re.compile(r"[\x00-\x20]+")
+# 보안 검증 발견(PR 리뷰, 4차): HTML의 "빈 요소"(void element)는 애초에 닫는 태그가
+# 존재하지 않는다. `link`/`embed`가 위험 태그 목록에 있는데 이를 몰랐더니,
+# `<link href=x>`처럼 `/`로 안 닫힌 형태가 나오면 매칭되는 `</link>`가 영원히
+# 오지 않아 skip_depth가 계속 올라간 채 남아 그 뒤의 문서 전체가 사라졌다(보안
+# 문제가 아니라 심각한 데이터 유실 회귀) — 빈 요소는 여는 태그만으로 항상
+# self-closing으로 취급한다.
+_VOID_ELEMENTS = {
+    "area", "base", "br", "col", "embed", "hr", "img", "input",
+    "link", "meta", "param", "source", "track", "wbr",
+    # SVG 애니메이션 요소도 스펙상 빈 콘텐츠 모델(자식/닫는 태그를 진짜로
+    # 필요로 하지 않음)이라, link/embed와 같은 이유로 여기 포함해 skip_depth가
+    # 영원히 안 풀리는 것을 방지한다.
+    "animate", "set", "animatemotion", "animatetransform",
+}
+# 코드 리뷰 발견(PR 리뷰): html.parser.HTMLParser는 HTML이 대소문자를 구분하지
+# 않는다는 전제로 속성명을 *토크나이저 단계에서* 전부 소문자화한다(우리 코드가
+# 손댈 수 있는 지점보다 앞). 그런데 flowgen.py가 본문에 인라인으로 꽂는 SVG는
+# XML이라 대소문자를 구분하므로 `viewBox`→`viewbox`, `refX`→`refX`가 아니라
+# `refx`처럼 깨지면 브라우저/PDF 엔진이 그 속성을 아예 인식 못 한다 — 실제로
+# 커밋된 PDF를 렌더링해서 사용자 여정 다이어그램의 박스·화살표가 통째로
+# 사라지는 걸 확인했다. flowgen.py가 실제로 쓰는 속성만, 소문자→정식 표기로
+# 복원하는 좁은 허용목록으로 되돌린다(값에 신뢰 못 할 텍스트가 들어가는 속성이
+# 아니라 고정 템플릿/숫자 레이아웃 값만 담는 속성들이라 이름을 되돌려도 새
+# 위험이 생기지 않는다).
+_SVG_ATTR_CASE_FIX = {
+    "viewbox": "viewBox",
+    "refx": "refX",
+    "refy": "refY",
+    "markerwidth": "markerWidth",
+    "markerheight": "markerHeight",
+}
+
+
+def _has_dangerous_scheme(value: str) -> bool:
+    """브라우저는 URL 스킴 판정 전에 문자 참조를 디코딩하고 탭/개행/제어문자를
+    무시한다 — HTMLParser가 attrs를 넘길 때 이미 문자 참조는 디코딩된 상태이므로,
+    여기서는 제어문자만 제거하고 대소문자 무시로 스킴 접두어를 비교한다."""
+    if value is None:
+        return False
+    normalized = _CONTROL_CHARS.sub("", value).lower()
+    return normalized.startswith(("javascript:", "vbscript:", "data:text/html"))
+
+
+class _HtmlSanitizer(HTMLParser):
+    """위험 태그(및 그 내용)를 제거하고, 남는 태그의 `on*=` 이벤트 속성과
+    `javascript:`/`vbscript:`/`data:text/html` URL 스킴을 무력화한 뒤 재직렬화한다.
+    convert_charrefs=False로 두어 일반 텍스트(코드스팬 등 이미 이스케이프된 내용
+    포함)는 원문 그대로(엔티티 표기 보존) 통과시킨다 — 디코딩 후 그대로 재출력하면
+    `&lt;`가 리터럴 `<`로 부활해 구조를 재주입할 위험이 있기 때문."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.out = []
+        self._skip_depth = 0
+
+    def _open(self, tag, attrs, self_closing):
+        tl = tag.lower()
+        self_closing = self_closing or tl in _VOID_ELEMENTS
+        if tl in _DANGEROUS_TAG_NAMES:
+            if not self_closing:
+                self._skip_depth += 1
+            return
+        if self._skip_depth:
+            return
+        cleaned = []
+        for name, value in attrs:
+            nl = name.lower()
+            if nl.startswith("on"):
+                continue
+            # 코드 리뷰 발견(자체 재검토): `style` 속성값은 이름/스킴 검사 대상이
+            # 아니라 그대로 통과했다 — `style="background:url(https://evil/..)"`
+            # 같은 CSS로 조용히 외부로 비콘을 보내거나 `style="...;--x:...;"` 류로
+            # 레이아웃을 조작할 수 있다. CSS 값을 안전하게 검증할 방법이 없으므로
+            # `on*` 이벤트 핸들러와 같은 방식으로 속성 자체를 통째로 제거한다.
+            if nl == "style":
+                continue
+            if nl in _URL_ATTRS and _has_dangerous_scheme(value):
+                value = "blocked:" + value
+            cleaned.append((_SVG_ATTR_CASE_FIX.get(nl, name), value))
+        self.out.append(self._serialize(tag, cleaned, self_closing))
+
+    @staticmethod
+    def _serialize(tag, attrs, self_closing):
+        parts = [f"<{tag}"]
+        for name, value in attrs:
+            if value is None:
+                parts.append(f" {name}")
+            else:
+                parts.append(f' {name}="{html.escape(value, quote=True)}"')
+        parts.append("/>" if self_closing else ">")
+        return "".join(parts)
+
+    def handle_starttag(self, tag, attrs):
+        self._open(tag, attrs, self_closing=False)
+
+    def handle_startendtag(self, tag, attrs):
+        self._open(tag, attrs, self_closing=True)
+
+    def handle_endtag(self, tag):
+        tl = tag.lower()
+        # 빈 요소는 _open에서 애초에 skip_depth를 올리지 않으므로, 형식이
+        # 어긋난 `</link>` 같은 종료 태그가 (있을 리 없지만) 나타나더라도
+        # 무관한 depth를 잘못 줄이지 않도록 대칭적으로 무시한다.
+        if tl in _DANGEROUS_TAG_NAMES:
+            if tl not in _VOID_ELEMENTS and self._skip_depth:
+                self._skip_depth -= 1
+            return
+        if not self._skip_depth:
+            self.out.append(f"</{tag}>")
+
+    def handle_data(self, data):
+        if not self._skip_depth:
+            self.out.append(data)
+
+    def handle_entityref(self, name):
+        if not self._skip_depth:
+            self.out.append(f"&{name};")
+
+    def handle_charref(self, name):
+        if not self._skip_depth:
+            self.out.append(f"&#{name};")
+
+    def handle_comment(self, data):
+        pass  # 주석은 통째로 버린다 (조건부 주석류 트릭 방지, 내용 손실은 무해)
+
+
+def _sanitize_html_fragment(html_text: str) -> str:
+    """python-markdown은 raw HTML을 기본적으로 그대로 통과시킨다(safe_mode 없음).
+    표 셀 텍스트는 extract.py의 _escape_cell이 이미 이스케이프하지만, Step 2/3에서
+    LLM이 메시지 원문을 표가 아닌 본문 서술로 옮겨 적으면 그 경로는 보호되지
+    않는다 — 렌더링 최종 단계의 방어선(defense-in-depth)으로 실행 가능한 태그·
+    이벤트 핸들러·스크립트성 URL 스킴을 무력화한다."""
+    parser = _HtmlSanitizer()
+    parser.feed(html_text)
+    parser.close()
+    return "".join(parser.out)
+
+
+_SAFE_CSS_COLOR = re.compile(r"^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$|^[a-zA-Z]{1,20}$")
+_SAFE_LANG_TAG = re.compile(r"^[a-zA-Z]{1,8}(-[a-zA-Z0-9]{1,8})*$")
+
+
+def _safe_css_color(value: str, default: str) -> str:
+    """코드 리뷰 발견(자체 재검토): `accent`가 `h1 {{ ... {accent}; }}`처럼 CSS
+    선언 값 자리에 따옴표 없이 그대로 꽂힌다 — 여기엔 이스케이프로 막을 '문자열'이
+    없고(값 자체가 토큰), `accent="red;}}</style><script>..."` 같은 입력이 그대로
+    `</style>` 바깥으로 탈출해 `<script>`를 주입할 수 있었다(직접 실행해 확인).
+    CSS 색상 값은 애초에 표현 가능한 문자 집합이 좁으므로, 이스케이프 대신
+    hex 코드(`#rgb`/`#rrggbb`) 또는 알파벳 색상명만 허용하는 허용목록으로
+    검증하고, 벗어나면 기본값으로 대체한다(stderr 경고)."""
+    if _SAFE_CSS_COLOR.match(value):
+        return value
+    print(f"⚠️  --accent 값이 올바른 CSS 색상 형식이 아니라 기본값으로 대체합니다: {value!r}",
+          file=sys.stderr)
+    return default
+
+
+def _safe_lang_tag(value: str, default: str) -> str:
+    """코드 리뷰 발견(자체 재검토): `lang`이 `<html lang="{lang}">`의 속성값
+    자리에 그대로 꽂힌다 — `lang='ko"><script>...'`처럼 따옴표를 포함하면 속성을
+    조기에 닫고 임의 태그를 주입할 수 있었다(직접 실행해 확인). BCP47 언어
+    태그는 알파벳·숫자·하이픈만 쓰므로, 그 형식만 허용하는 허용목록으로
+    검증하고 벗어나면 기본값으로 대체한다(stderr 경고) — accent와 같은 설계."""
+    if _SAFE_LANG_TAG.match(value):
+        return value
+    print(f"⚠️  --lang 값이 올바른 언어 태그 형식이 아니라 기본값으로 대체합니다: {value!r}",
+          file=sys.stderr)
+    return default
+
+
+def _css_dquote_escape(value: str) -> str:
+    """코드 리뷰 발견(자체 재검토): `title`이 `@page`의 `content: "{title}";`
+    처럼 CSS 큰따옴표 문자열 리터럴 안에 그대로 꽂힌다 — `"`로 문자열을 조기에
+    끝낸 뒤 `}}`로 CSS 규칙을, `</style>`로 HTML `<style>` 요소까지 깨고 나가
+    `<script>`를 주입할 수 있었다(직접 실행해 확인). 백슬래시·큰따옴표를
+    CSS 문자열 이스케이프로 무력화하고, `<`/`>`도 CSS 16진 이스케이프(`\\3c `/
+    `\\3e `, 끝의 공백이 이스케이프 종료자)로 바꾼다 — `<style>`은 CSS 파싱 전에
+    브라우저가 리터럴 `</style` 문자열을 찾아 raw-text 파싱을 끝내버리므로,
+    CSS 문자열 이스케이프만으로는 그 탈출을 막을 수 없기 때문이다.
+
+    자체 재검토(이 수정 자체의 버그): 제어문자 제거에 `_CONTROL_CHARS`
+    (`[\\x00-\\x20]+`, URL 스킴 접두어의 공백을 지우기 위한 패턴)를 그대로
+    재사용했다가, 0x20(스페이스)까지 지워져 "역기획 PRD"가 "역기획PRD"로
+    공백이 사라지는 회귀를 내 직접 테스트로 발견했다 — 제목 텍스트는 공백을
+    보존해야 하므로 스페이스를 제외한 제어문자(`\\x00-\\x1f`)만 지우는
+    별도 정규식을 쓴다."""
+    value = re.sub(r"[\x00-\x1f]", "", value)
+    value = value.replace("\\", "\\\\").replace('"', '\\"')
+    value = value.replace("<", "\\3c ").replace(">", "\\3e ")
+    return value
+
+
+def _insert_toc_marker(md_text: str) -> str:
+    """실무 가독성 개선: `toc` 확장은 이미 로드돼 있었지만 본문에 `[TOC]` 마커가
+    없으면 아무것도 렌더링하지 않아 목차가 비어 있었다. Step 3에서 LLM이 매번
+    마커를 기억해 써야 하는 구조는 깨지기 쉬우므로, render.py가 구조적으로
+    "제목/안내문 다음, 첫 `## ` 장 시작 직전"에 자동 삽입한다(skill 작성
+    규칙에 의존하지 않음 — reverse-prd/reverse-spec 공용으로 동일하게 적용).
+
+    코드 리뷰 발견(PR 리뷰, 직접 재현): 원래는 `md_text.find("\\n## ")`로
+    문서 전체에서 첫 매치를 찾았는데, 코드펜스(```/~~~) 안에 "## "로 시작하는
+    줄(예: 셸 스크립트 안의 `## comment`)이 1장 헤딩보다 먼저 나오면 그걸
+    진짜 헤딩으로 착각해 펜스 한가운데 `[TOC]`를 끼워넣어 코드블록을 둘로
+    쪼갰다 — 펜스 내부는 건너뛰고, 펜스 밖에서 줄 맨 앞이 `## `인 첫 줄만
+    찾는다."""
+    lines = md_text.split("\n")
+    in_fence = False
+    fence_marker = ""
+    offset = 0
+    insert_at = None
+    for line in lines:
+        stripped = line.lstrip()
+        if in_fence:
+            if stripped.startswith(fence_marker):
+                in_fence = False
+        elif stripped[:3] in ("```", "~~~"):
+            in_fence = True
+            fence_marker = stripped[:3]
+        elif line.startswith("## "):
+            insert_at = offset
+            break
+        offset += len(line) + 1
+    if insert_at is None:
+        return "[TOC]\n\n" + md_text
+    return md_text[:insert_at] + "[TOC]\n\n" + md_text[insert_at:]
+
+
+_BADGE_PATTERNS = [
+    (re.compile(r"\[추정\]"), lambda m: '<span class="badge badge-assumed">추정</span>'),
+    (re.compile(r"\[정보 없음(?:\s*—\s*[^\]]*)?\]"),
+     lambda m: f'<span class="badge badge-unknown">{m.group(0)[1:-1]}</span>'),
+    (re.compile(r"\[파서 미탐지 — 수동 확인\]"),
+     lambda m: '<span class="badge badge-assumed">파서 미탐지 — 수동 확인</span>'),
+]
+# 보호등급 셀은 `공개`/`🔒 ...`가 표 셀 전체일 때만 매칭 — "공개"는 평범한
+# 단어라 본문 중 임의 등장까지 배지로 바꾸면 의미가 다른 문장을 오염시킨다.
+_GUARD_CELL = re.compile(r"(<td[^>]*>)\s*(공개|🔒\s*[^<]{0,24}?)\s*(</td>)")
+
+
+def _badge_guard_cell(m: "re.Match") -> str:
+    open_td, label, close_td = m.group(1), m.group(2), m.group(3)
+    cls = "badge-public" if label == "공개" else "badge-protected"
+    return f'{open_td}<span class="badge {cls}">{label}</span>{close_td}'
+
+
+def _apply_badges(html_text: str) -> str:
+    """실무 가독성 개선: `[추정]`/`[정보 없음 ...]`/보호등급(공개·🔒)이 평문이라
+    표를 훑을 때 눈에 안 띈다는 지적(실무 사용성 리뷰) — 배지(badge) 스타일로
+    시각화한다. `<pre>` 코드 블록 내부는 건드리지 않는다(예시 코드에 우연히
+    같은 문구가 있어도 변형하지 않기 위해 — 기존 sanitizer와 같은 defense-in-
+    depth 관례로, 짝수 인덱스만 치환해 <pre> 블록을 건너뛴다).
+
+    코드 리뷰 발견(PR 리뷰, 직접 재현): `<pre>`만 건너뛰고 `<svg>`는 안
+    건너뛰어서, flowgen.py가 만든 다이어그램의 `<text>[추정] ...</text>`
+    안에까지 `<span class="badge...">`를 끼워넣었다. HTML5 파싱 규칙상
+    `span`은 SVG(foreign content) 안에 나오면 그 지점에서 SVG 트리를
+    통째로 빠져나가 버리는 "breakout" 태그라, 그 뒤에 나오는 `<rect>`
+    노드 박스들이 전부 `<svg>` 밖으로 밀려나 렌더링 자체가 안 됐다(PDF를
+    직접 렌더링해 사용자 여정 다이어그램의 박스가 통째로 사라지는 것으로
+    확인). `<pre>`와 같은 방식으로 `<svg>...</svg>` 구간도 건너뛴다."""
+    parts = re.split(r"(<pre[\s\S]*?</pre>|<svg[\s\S]*?</svg>)", html_text)
+    for i in range(0, len(parts), 2):
+        seg = parts[i]
+        for pat, repl in _BADGE_PATTERNS:
+            seg = pat.sub(repl, seg)
+        seg = _GUARD_CELL.sub(_badge_guard_cell, seg)
+        parts[i] = seg
+    return "".join(parts)
 
 
 def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
     import markdown
+    # 코드 리뷰 발견(자체 재검토): 이 함수는 본문(md_text)만 _sanitize_html_fragment로
+    # 걸렀을 뿐, title/accent/lang은 전혀 검증 없이 아래 템플릿의 HTML 속성/CSS
+    # 값/CSS 문자열 자리에 바로 꽂혔다 — render.py가 이미 --name에 적용한 것과
+    # 같은 전제(이 스크립트는 분석된 저장소 내용을 바탕으로 에이전트가 인자를
+    # 구성하므로 untrusted)가 이 세 인자에도 똑같이 적용되는데, 이 PR이 막으려던
+    # XSS를 본문이 아닌 다른 입력 경로로 그대로 재현할 수 있었다(직접 실행해 확인).
+    accent = _safe_css_color(accent, "#1f4e79")
+    lang = _safe_lang_tag(lang, "ko")
+    title_css = _css_dquote_escape(title)
+    lang_attr = html.escape(lang, quote=True)
     # python-markdown 코어에 취소선(~~text~~)이 없어 <del>로 선치환 (HTML/PDF 공통)
     md_text = re.sub(r"~~(.+?)~~", r"<del>\1</del>", md_text)
-    body = markdown.markdown(md_text, extensions=["tables", "toc", "fenced_code"])
+    md_text = _insert_toc_marker(md_text)
+    body = markdown.markdown(md_text, extensions=["tables", "toc", "fenced_code"],
+                             extension_configs={"toc": {"toc_depth": "2-3", "title": "목차"}})
+    body = _sanitize_html_fragment(body)
+    # 배지는 반드시 sanitizer 통과 *이후*에 입힌다 — 여기서 만드는 <span class="badge ...">는
+    # 코드가 직접 쓰는 고정 문자열뿐이라 새 입력 경로를 만들지 않는다(accent/lang/title과
+    # 달리 외부에서 값을 주입할 지점이 없음).
+    body = _apply_badges(body)
     return f"""<!DOCTYPE html>
-<html lang="{lang}">
+<html lang="{lang_attr}">
 <head>
 <meta charset="UTF-8">
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&display=swap');
-  body {{ font-family: 'Noto Sans KR', sans-serif; font-size: 11pt; line-height: 1.8;
+  body {{ font-family: 'Noto Sans KR', sans-serif; font-size: 11pt; line-height: 1.7;
           color: #1a1a1a; margin: 0; padding: 0; }}
-  h1 {{ font-size: 20pt; border-bottom: 2px solid {accent}; padding-bottom: 8px;
-        margin-top: 40px; color: {accent}; }}
-  h2 {{ font-size: 15pt; border-left: 4px solid {accent}; padding-left: 10px; margin-top: 30px; }}
+  /* 표지 배너 — 문서의 유일한 h1을 큰 색상 카드로 올려 "표지"처럼 보이게 한다.
+     커버만을 위한 별도 입력값(로고·부제 등)을 새로 받지 않는다 — 이미 검증된
+     accent/title만 재사용해 새 이스케이프 지점을 만들지 않는다. */
+  h1 {{ font-size: 22pt; text-align: center; color: #ffffff; background: {accent};
+        padding: 26px 24px; margin: 0 0 22px; border-radius: 10px; }}
+  h2 {{ font-size: 15pt; border-left: 4px solid {accent}; padding-left: 10px; margin-top: 34px; }}
   h3 {{ font-size: 12pt; color: #444; margin-top: 20px; }}
+  /* 표지 바로 다음 장(1장)부터 PDF에서 새 페이지로 시작 — 배너+안내문+목차가
+     사실상의 "1페이지 표지" 역할을 한다. 화면(HTML)에서는 인쇄 시에만 적용되고
+     평소 스크롤 보기에는 영향 없다. */
+  h2:first-of-type {{ page-break-before: always; }}
   table {{ width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 10pt; }}
   th {{ background: {accent}; color: white; padding: 8px 12px; text-align: left; }}
-  td {{ border: 1px solid #ccc; padding: 7px 12px; vertical-align: top; }}
+  td {{ border: 1px solid #dde3e9; padding: 7px 12px; vertical-align: top; }}
   tr:nth-child(even) td {{ background: #f5f7fa; }}
   code {{ background: #eef2f7; padding: 2px 5px; border-radius: 3px; font-size: 9.5pt; }}
   pre {{ background: #1e1e1e; color: #d4d4d4; padding: 14px; border-radius: 6px;
@@ -65,14 +443,30 @@ def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
   pre code {{ background: transparent; color: inherit; padding: 0; }}
   blockquote {{ border-left: 4px solid #c47a00; background:#fff8ec; margin:16px 0;
                padding:8px 16px; color:#7a5200; }}
+  /* 자동 목차 ([TOC] 마커는 render.py가 본문에 직접 삽입 — build_html 참조) */
+  .toc {{ background: #f4f6f8; border: 1px solid #dde3e9; border-radius: 8px;
+          padding: 14px 22px; margin: 0 0 20px; }}
+  .toc .toctitle {{ font-weight: 700; font-size: 11pt; color: {accent}; }}
+  .toc ul {{ list-style: none; padding-left: 14px; margin: 6px 0; }}
+  .toc ul ul {{ padding-left: 18px; }}
+  .toc li {{ margin: 3px 0; }}
+  .toc a {{ color: #41505c; text-decoration: none; font-size: 10pt; }}
+  /* 상태 배지 — [추정]/[정보 없음 ...]/보호등급을 평문 대신 한눈에 띄는 pill로
+     표시한다(실무 가독성 개선 — build_html의 _apply_badges 참조). */
+  .badge {{ display: inline-block; padding: 1px 9px; border-radius: 10px;
+            font-size: 9pt; font-weight: 700; line-height: 1.5; }}
+  .badge-assumed {{ background: #fdf1e2; color: #8a5a00; border: 1px solid #e8c383; }}
+  .badge-unknown {{ background: #fdeaea; color: #a12b2b; border: 1px solid #eeb3b3; }}
+  .badge-protected {{ background: #e8f0fa; color: {accent}; border: 1px solid #b8cfe8; }}
+  .badge-public {{ background: #eef2f3; color: #51606b; border: 1px solid #cdd6dc; }}
   /* 브라우저 화면 전용 여백 — weasyprint(PDF)는 print 매체라 무시하고 @page 여백을 쓴다 */
   @media screen {{
-    body {{ max-width: 860px; margin: 0 auto; padding: 32px 24px; }}
+    body {{ max-width: 880px; margin: 0 auto; padding: 32px 24px; }}
   }}
   @page {{
     size: A4;
     margin: 20mm 18mm 20mm 20mm;
-    @top-center {{ content: "{title}"; font-size: 9pt; color: #888; }}
+    @top-center {{ content: "{title_css}"; font-size: 9pt; color: #888; }}
     @bottom-right {{ content: counter(page) " / " counter(pages); font-size: 9pt; color: #888; }}
   }}
 </style>
@@ -86,7 +480,7 @@ def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
 def render_pdf(md_text: str, out_path: pathlib.Path, title: str, accent: str, lang: str) -> None:
     from weasyprint import HTML
     HTML(string=build_html(md_text, title, accent, lang),
-         url_fetcher=_pdf_url_fetcher).write_pdf(str(out_path))
+         url_fetcher=_make_pdf_url_fetcher()).write_pdf(str(out_path))
 
 
 def render_html(md_text: str, out_path: pathlib.Path, title: str, accent: str, lang: str) -> None:
@@ -316,8 +710,18 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    # 보안: --name은 "reverse_prd" 같은 파일명 접두어여야 하는데, 경로 구분자나
+    # ".."가 섞여 들어오면 out_dir 밖에 파일을 쓰는 경로 조작이 될 수 있다
+    # (이 스크립트는 에이전트가 분석 대상 코드/문서 내용을 바탕으로 인자를 구성해
+    # 호출하므로, 신뢰 못 할 입력이 --name까지 흘러들 가능성을 전제로 방어한다).
+    # 디렉터리 구성요소를 제거해 순수 파일명만 남긴다.
+    safe_name = pathlib.PurePosixPath(args.name.replace("\\", "/")).name or "reverse_doc"
+    if safe_name != args.name:
+        print(f"⚠️  --name 값을 안전한 파일명으로 정규화함: {args.name!r} → {safe_name!r}",
+              file=sys.stderr)
+
     for fmt in formats:  # 같은 타임스탬프로 세트 생성 (예: _104205.pdf + _104205.html)
-        out_path = out_dir / f"{args.name}_{ts}.{fmt}"
+        out_path = out_dir / f"{safe_name}_{ts}.{fmt}"
         if fmt == "pdf":
             render_pdf(md_text, out_path, args.title, args.accent, args.lang)
         elif fmt == "docx":
