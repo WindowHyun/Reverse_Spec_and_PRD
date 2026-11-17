@@ -373,6 +373,42 @@ def _looks_like_generic_params(src: str, idx: int) -> bool:
     return False
 
 
+def _skip_comment_or_regex(src: str, i: int, n: int):
+    """"code" 맥락에서 블록 주석(`/* ... */`)·줄 주석(`//...`)·정규식 리터럴을
+    건너뛴다. 건너뛸 게 있으면 새 위치를, 없으면 `None`을 반환한다.
+
+    코드 리뷰 발견(PR 리뷰): 아래 네 스캐너(`_find_matching_skip_strings`/
+    `_iter_fetch_calls`/`_find_if_return_pairs`/`_iter_disabled_conditions`)가
+    전부 이 세 검사를 토씨 하나 안 틀리고 각자 다시 구현하고 있었다 — §13.13/
+    13.14/13.16에서 "코드 맥락 주석·정규식 리터럴 안의 아포스트로피를 문자열
+    시작으로 오인"하는 같은 버그가 네 번 따로 재발·수정된 이유이기도 하다.
+    호출부는 `mode == "code" and ch == "/"`일 때만 불러야 한다(이 함수
+    자신은 모드를 보지 않고 호출부가 이미 그 판단을 했다고 가정한다)."""
+    ch = src[i]
+    if ch == "/" and i + 1 < n and src[i + 1] == "*":
+        end = src.find("*/", i + 2)
+        return end + 2 if end != -1 else n
+    if ch == "/" and i + 1 < n and src[i + 1] == "/":
+        nl = src.find("\n", i + 2)
+        return nl + 1 if nl != -1 else n
+    if (ch == "/" and i + 1 < n and src[i + 1] != "/"
+            and _looks_like_regex_start(src, i)):
+        return _skip_regex_literal(src, i)
+    return None
+
+
+def _advance_in_quote(src: str, i: int, quote: str):
+    """단순 플래그 기반 따옴표 추적(이스케이프만 존중, 중첩/보간 없음) 한 걸음
+    전진 — `_find_if_return_pairs`와 `_iter_disabled_conditions`가 똑같이
+    쓰던 5줄을 공유한다. `(새 위치, 새 quote)`를 반환한다."""
+    ch = src[i]
+    if ch == "\\":
+        return i + 2, quote
+    if ch == quote:
+        return i + 1, None
+    return i + 1, quote
+
+
 def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch: str) -> int:
     """`_find_matching`과 같되, "JSX 텍스트"와 "코드"(태그 속성/표현식) 맥락을
     구분해 코드 맥락의 문자열 리터럴 안 여는/닫는 문자는 깊이 계산에서
@@ -426,36 +462,13 @@ def _find_matching_skip_strings(src: str, open_idx: int, open_ch: str, close_ch:
     while i < n:
         ch = src[i]
 
-        # 정확성 검증 발견(PR 리뷰): `<Page /> /* don't */`처럼 코드 맥락의
-        # 블록 주석 안에 아포스트로피가 있으면, 주석을 인식 못 하고 그 안의
-        # 따옴표를 문자열 시작으로 오인해 §13.7과 같은 증상(스캔이 EOF까지
-        # 튀어 -1 반환)이 재발했다 — `_blank_full_line_comments`는 줄 전체
-        # `//` 주석만 지우고 블록 주석은 reference.md 1-I에 명시된 대로 원래
-        # 처리 대상이 아니었다. 코드 맥락에서 `/*`를 보면 대응하는 `*/`까지
-        # (없으면 파일 끝까지) 통째로 건너뛴다.
-        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "*":
-            end = src.find("*/", i + 2)
-            i = end + 2 if end != -1 else n
-            continue
-
-        # 정확성 검증 발견(PR 리뷰): `_blank_full_line_comments`는 `//` 앞에
-        # 공백이 있을 때만 트레일링 주석으로 본다(URL 오손상 방지 목적) —
-        # `const x=1;// don't`처럼 공백 없이 바로 붙은 `//` 주석은 지워지지
-        # 않고 그대로 남아 안의 아포스트로피가 문자열 시작으로 오인됐다.
-        # 개행까지(없으면 파일 끝까지) 건너뛴다.
-        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "/":
-            nl = src.find("\n", i + 2)
-            i = nl + 1 if nl != -1 else n
-            continue
-
-        # 정확성 검증 발견(PR 리뷰): `/don't/.test(value)`처럼 정규식 리터럴
-        # 안의 아포스트로피도 문자열 시작으로 오인해 같은 증상이 재발했다 —
-        # 나눗셈과 정규식 리터럴 시작은 문법적으로 모호하므로(`<`와 같은
-        # 종류의 문제) `_looks_like_regex_start`로 판정 후 건너뛴다.
-        if (mode == "code" and ch == "/" and i + 1 < n and src[i + 1] != "/"
-                and _looks_like_regex_start(src, i)):
-            i = _skip_regex_literal(src, i)
-            continue
+        # §13.7과 같은 증상(코드 맥락 주석·정규식 리터럴 안 아포스트로피를
+        # 문자열 시작으로 오인)의 공통 해법 — 네 스캐너가 공유(_skip_comment_or_regex 참조).
+        if mode == "code" and ch == "/":
+            skip = _skip_comment_or_regex(src, i, n)
+            if skip is not None:
+                i = skip
+                continue
 
         if mode == "code" and ch in ("'", '"'):
             i = _skip_delimited(i + 1, ch)
@@ -756,32 +769,13 @@ def _iter_fetch_calls(src: str):
     while i < n:
         ch = src[i]
 
-        # 정확성 검증 발견(PR 리뷰): 라우트 스캐너의 §13.13과 같은 문제가
-        # fetch 스캐너에도 있었다 — `/* don't */`처럼 code 맥락의 블록 주석
-        # 안에 아포스트로피가 있으면 문자열 시작으로 오인해 그 뒤의 정상
-        # fetch 호출까지 못 봤다. 대응하는 `*/`까지(없으면 파일 끝까지) 건너뛴다.
-        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "*":
-            end = src.find("*/", i + 2)
-            i = end + 2 if end != -1 else n
-            continue
-
-        # 정확성 검증 발견(PR 리뷰): `const x=1;// don't`처럼 `//` 앞에 공백이
-        # 없으면 `_blank_full_line_comments`가 지우지 않는다(URL 오손상 방지
-        # 목적으로 공백이 있을 때만 트레일링 주석으로 인식) — 안의 아포스트로피가
-        # 문자열 시작으로 오인되지 않도록 개행까지 건너뛴다.
-        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "/":
-            nl = src.find("\n", i + 2)
-            i = nl + 1 if nl != -1 else n
-            continue
-
-        # 정확성 검증 발견(PR 리뷰): `/don't/.test(value); fetch("/real")`처럼
-        # 정규식 리터럴 안의 아포스트로피도 문자열 시작으로 오인해 그 뒤의
-        # 정상 fetch 호출을 놓쳤다 — 나눗셈과 정규식 리터럴 시작은 문법적으로
-        # 모호하므로 `_looks_like_regex_start`로 판정 후 건너뛴다.
-        if (mode == "code" and ch == "/" and i + 1 < n and src[i + 1] != "/"
-                and _looks_like_regex_start(src, i)):
-            i = _skip_regex_literal(src, i)
-            continue
+        # 코드 맥락 주석·정규식 리터럴 안 아포스트로피 오인(§13.13 계열) —
+        # 네 스캐너가 공유(_skip_comment_or_regex 참조).
+        if mode == "code" and ch == "/":
+            skip = _skip_comment_or_regex(src, i, n)
+            if skip is not None:
+                i = skip
+                continue
 
         if mode == "code" and ch in ("'", '"'):
             if attr_quote_stack and ch == attr_quote_stack[-1]:
@@ -984,32 +978,15 @@ def _find_if_return_pairs(src: str) -> list:
     while i < n:
         ch = src[i]
         if quote:
-            if ch == "\\":
-                i += 2
+            i, quote = _advance_in_quote(src, i, quote)
+            continue
+        # 라우트/fetch 스캐너와 같은 문제(코드 맥락 주석·정규식 리터럴 안
+        # 아포스트로피 오인) — 네 스캐너가 공유(_skip_comment_or_regex 참조).
+        if mode == "code" and ch == "/":
+            skip = _skip_comment_or_regex(src, i, n)
+            if skip is not None:
+                i = skip
                 continue
-            if ch == quote:
-                quote = None
-            i += 1
-            continue
-        # 정확성 검증 발견(PR 리뷰): 라우트/fetch 스캐너와 같은 문제 —
-        # `/* don't */ if (x) return "bad"`처럼 조건 앞뒤 블록 주석 안의
-        # 아포스트로피를 문자열 시작으로 오인하면 이 if 전체를 못 찾았다.
-        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "*":
-            end = src.find("*/", i + 2)
-            i = end + 2 if end != -1 else n
-            continue
-        # `//`는 공백 없이 붙으면 `_blank_full_line_comments`가 안 지운다 —
-        # 마찬가지로 개행까지 건너뛴다.
-        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "/":
-            nl = src.find("\n", i + 2)
-            i = nl + 1 if nl != -1 else n
-            continue
-        # `/don't/.test(x)`류 정규식 리터럴 안의 아포스트로피도 같은 이유로
-        # 문자열 시작으로 오인될 수 있어 마찬가지로 건너뛴다.
-        if (mode == "code" and ch == "/" and i + 1 < n and src[i + 1] != "/"
-                and _looks_like_regex_start(src, i)):
-            i = _skip_regex_literal(src, i)
-            continue
         if mode == "code" and ch in ("'", '"'):
             quote = ch
             i += 1
@@ -1149,25 +1126,15 @@ def _iter_disabled_conditions(src: str):
     while i < n:
         ch = src[i]
         if quote:
-            if ch == "\\":
-                i += 2
+            i, quote = _advance_in_quote(src, i, quote)
+            continue
+        # 코드 맥락 주석·정규식 리터럴 안 아포스트로피 오인 — 네 스캐너가
+        # 공유(_skip_comment_or_regex 참조).
+        if mode == "code" and ch == "/":
+            skip = _skip_comment_or_regex(src, i, n)
+            if skip is not None:
+                i = skip
                 continue
-            if ch == quote:
-                quote = None
-            i += 1
-            continue
-        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "*":
-            end = src.find("*/", i + 2)
-            i = end + 2 if end != -1 else n
-            continue
-        if mode == "code" and ch == "/" and i + 1 < n and src[i + 1] == "/":
-            nl = src.find("\n", i + 2)
-            i = nl + 1 if nl != -1 else n
-            continue
-        if (mode == "code" and ch == "/" and i + 1 < n and src[i + 1] != "/"
-                and _looks_like_regex_start(src, i)):
-            i = _skip_regex_literal(src, i)
-            continue
         if mode == "code" and ch in ("'", '"', "`"):
             quote = ch
             i += 1
