@@ -6,6 +6,8 @@
 
 ## 1. Overview (개요)
 
+> 이 장은 어떤 제품인지, 어떤 코드를 어느 시점 기준으로 분석했는지 한눈에 보여줍니다.
+
 | 항목 | 내용 |
 |------|------|
 | 제품 한 줄 요약 | 로그인 사용자가 OpenAI 기반 챗봇과 상담하고, 관리자는 응답 품질 eval 리포트를 보는 AI 고객지원 서비스 |
@@ -30,10 +32,14 @@
 
 ## 2. Background & Problem (배경 & 문제 정의)
 
+> 이 제품이 왜 만들어졌고 어떤 불편을 풀려는지 추정한 내용입니다(코드에 의도가 적혀 있지 않아 추정).
+
 - **추정 배경** `[추정]` — 상담원 응대 없이도 1차 문의를 처리하는 24시간 AI 상담 채널. (`package.json.description` "로그인 사용자가 OpenAI 기반 상담 챗봇과 대화" 근거)
 - **해결하려는 문제** `[추정]` — 사람이 상주하지 않는 시간대의 단순 문의(배송/환불 등) 응대 지연 문제 (`src/evals/chatbot.eval.ts`의 골든셋 주제 "배송"/"환불" 근거)
 
 ## 3. Goals & Success Metrics (목표 & 성공지표)
+
+> 이 제품이 달성하려는 목표와, 성공 여부를 어떻게 재고 있었는지(또는 재지 않았는지) 정리합니다.
 
 | 구분 | 내용 | 근거 |
 |------|------|------|
@@ -53,32 +59,39 @@
 
 ## 4. Users & Personas (사용자 & 페르소나)
 
+> 누가 이 제품을 쓰는지, 권한별로 무엇이 다른지 정리합니다.
+
 | 페르소나 | 설명 | 근거 |
 |----------|------|------|
 | 비로그인 방문자 | 홈/로그인 화면만 접근 | `/`, `/login`이 가드 없음 |
-| 일반 사용자 (user) | 로그인 후 AI 챗봇과 상담 | `/chat`이 `RequireAuth`로 보호 |
+| 일반 사용자 (user) | 로그인 후 AI 챗봇과 상담 | `/chat`이 로그인 확인 장치(`RequireAuth`)로 보호 |
 | 관리자 (admin) | 챗봇 품질 eval 리포트 열람 | `RequireAuth role="admin"` |
 
 ## 5. User Stories & Journey (사용자 스토리 & 여정)
 
+> 사용자가 화면을 어떤 순서로 오가며 무엇을 하려는지(여정)와, 그 바람을 한 문장씩(스토리) 보여줍니다.
+
 **5.1 사용자 여정 다이어그램** (flowgen.py 생성 — 점선은 조건부/추정 전환, 🔒는 보호 라우트)
 
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1176 100" width="100%" style="max-width:1176px;font-family:'Noto Sans KR',sans-serif;">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 808 182" width="100%" style="max-width:808px;font-family:'Noto Sans KR',sans-serif;">
 <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#5a6672"/></marker></defs>
-<path d="M 192 50.0 C 228.0 50.0, 228.0 50.0, 264 50.0" fill="none" stroke="#5a6672" stroke-width="1.6" marker-end="url(#arrow)" stroke-dasharray="5 4"/>
-<text x="228.0" y="42.0" font-size="11" fill="#41505c" text-anchor="middle">[추정] 로그인하고 상담 시작하기 클릭</text>
-<path d="M 432 50.0 C 468.0 50.0, 468.0 50.0, 504 50.0" fill="none" stroke="#5a6672" stroke-width="1.6" marker-end="url(#arrow)"/>
-<text x="468.0" y="42.0" font-size="11" fill="#41505c" text-anchor="middle">로그인 완료 (navigate)</text>
+<path d="M 192 50.0 C 256.0 50.0, 256.0 50.0, 320 50.0" fill="none" stroke="#5a6672" stroke-width="1.6" marker-end="url(#arrow)" stroke-dasharray="5 4"/>
+<text x="256.0" y="29.0" font-size="11" fill="#41505c" text-anchor="middle">[추정] 로그인하고</text>
+<text x="256.0" y="42.0" font-size="11" fill="#41505c" text-anchor="middle">상담 시작하기 클릭</text>
+<path d="M 488 50.0 C 552.0 50.0, 552.0 50.0, 616 50.0" fill="none" stroke="#5a6672" stroke-width="1.6" marker-end="url(#arrow)"/>
+<text x="552.0" y="29.0" font-size="11" fill="#41505c" text-anchor="middle">로그인 완료</text>
+<text x="552.0" y="42.0" font-size="11" fill="#41505c" text-anchor="middle">(navigate)</text>
 <rect x="24" y="24" width="168" height="52" rx="8" fill="#f4f6f8" stroke="#8a97a3" stroke-width="1.6"/>
 <text x="108.0" y="54.0" font-size="12.5" font-weight="bold" fill="#22303c" text-anchor="middle">홈 /</text>
-<rect x="264" y="24" width="168" height="52" rx="8" fill="#f4f6f8" stroke="#8a97a3" stroke-width="1.6"/>
-<text x="348.0" y="54.0" font-size="12.5" font-weight="bold" fill="#22303c" text-anchor="middle">로그인 /login</text>
-<rect x="504" y="24" width="168" height="52" rx="8" fill="#e8f0fa" stroke="#2e75b6" stroke-width="1.6"/>
-<text x="588.0" y="47.0" font-size="12.5" font-weight="bold" fill="#22303c" text-anchor="middle">AI 상담 /chat</text>
-<text x="588.0" y="64.0" font-size="10" fill="#2e75b6" text-anchor="middle">🔒</text>
-<rect x="984" y="24" width="168" height="52" rx="8" fill="#fdf1e2" stroke="#c47a00" stroke-width="1.6"/>
-<text x="1068.0" y="47.0" font-size="12.5" font-weight="bold" fill="#22303c" text-anchor="middle">eval 리포트 /admin/evals</text>
-<text x="1068.0" y="64.0" font-size="10" fill="#c47a00" text-anchor="middle">🔒 admin</text>
+<rect x="320" y="24" width="168" height="52" rx="8" fill="#f4f6f8" stroke="#8a97a3" stroke-width="1.6"/>
+<text x="404.0" y="54.0" font-size="12.5" font-weight="bold" fill="#22303c" text-anchor="middle">로그인 /login</text>
+<rect x="616" y="24" width="168" height="52" rx="8" fill="#e8f0fa" stroke="#2e75b6" stroke-width="1.6"/>
+<text x="700.0" y="47.0" font-size="12.5" font-weight="bold" fill="#22303c" text-anchor="middle">AI 상담 /chat</text>
+<text x="700.0" y="64.0" font-size="10" fill="#2e75b6" text-anchor="middle">🔒</text>
+<rect x="24" y="106" width="168" height="52" rx="8" fill="#fdf1e2" stroke="#c47a00" stroke-width="1.6"/>
+<text x="108.0" y="129.0" font-size="11.3" font-weight="bold" fill="#22303c" text-anchor="middle">eval 리포트 /admin/evals</text>
+<text x="108.0" y="146.0" font-size="10" fill="#c47a00" text-anchor="middle">🔒 admin</text>
+<text x="24" y="98" font-size="10" fill="#8a97a3">코드에서 다른 화면과의 전환이 확인되지 않은 화면</text>
 </svg>
 
 > `/admin/evals`는 `/chat`과 코드상 전환 관계(링크·navigate)가 없어 독립 노드로 배치했다
@@ -97,6 +110,8 @@
 
 ## 6. Functional Requirements (기능 요구사항)
 
+> 시스템이 반드시 해야 하는 동작 목록입니다. 표의 FR은 기능 요구사항(Functional Requirement)의 약자이고, 코드 근거 칸에서 실제 구현 위치를 확인할 수 있습니다.
+
 | ID | 요구사항 | 코드 근거 |
 |----|----------|-----------|
 | FR-1 | 이메일 미입력 시 로그인을 막고 안내(MSG-16)한다 | `Login.login()` |
@@ -110,6 +125,8 @@
 
 ## 7. Non-functional Requirements (비기능 요구사항)
 
+> 보안·접근성·성능처럼 기능 외에 지켜야 할 품질 조건입니다.
+
 | 항목 | 내용 |
 |------|------|
 | 보안 `[추정]` | 권한 검증이 클라이언트에만 존재 → 서버 측 검증 확인 필요. `OPENAI_API_KEY`는 `process.env`로 참조되나 실제 값은 시크릿 스캔(1-J)에서 미발견 |
@@ -117,6 +134,8 @@
 | 성능/호환성 | **[정보 없음 — 별도 확인 필요]** |
 
 ## 8. Information Architecture & Flow (정보구조 & 흐름)
+
+> 화면 주소(경로) 목록과 로그인이 필요한 화면이 어디인지 보여줍니다.
 
 | Path | 화면 | 보호 |
 |------|------|------|
@@ -126,6 +145,8 @@
 | `/admin/evals` | eval 리포트 | 🔒 admin |
 
 ## 9. Data & API (데이터 & API)
+
+> 화면이 서버와 주고받는 요청(API)과, AI 모델 연동 현황을 정리합니다.
 
 **9.1 API 엔드포인트**
 
@@ -157,6 +178,8 @@
 
 ## 10. Integrations & Analytics (외부 연동 & 측정)
 
+> 외부 서비스 연동과 사용자 행동 측정(이벤트 추적) 현황입니다.
+
 **10.1 외부 연동 인벤토리**
 
 | 연동 대상 | 판정 |
@@ -172,11 +195,15 @@
 
 ## 11. Scope & Milestones (범위 & 일정)
 
+> 이번 분석에서 다룬 범위와 다루지 못한 범위를 구분합니다.
+
 - **In-scope**: 로그인, AI 챗봇 상담, 메시지 길이 검증, 관리자 eval 리포트 열람
 - **Out-of-scope** `[추정]`: 회원가입, 채팅 이력 저장/조회, 다국어 지원
 - **마일스톤**: **[정보 없음 — 별도 확인 필요]**
 
 ## 12. Risks & Open Questions (리스크 & 오픈 이슈)
+
+> 담당자가 확인·결정해야 할 위험과 질문 목록입니다. AI 기능 관련 항목은 R-AI로 표시합니다.
 
 | # | 리스크 / 질문 | 근거 |
 |---|----------------|------|
@@ -187,6 +214,8 @@
 | **R-AI-1** | **[AI 기능]** `openai` SDK·모델(`gpt-4o-mini`/`gpt-3.5-turbo`) 사용이 코드에서 확인됨 — 완료기준 허용오차·품질지표·eval 기준(합격선)은 코드에 없어 **PM이 별도 정의/교차검증 필요** | 1-K, 3장 AI PRD 주의 |
 
 ## 13. Appendix (부록)
+
+> 화면 문구 전체, 요구사항-화면-코드 대응표, QA 체크리스트 등 참고 자료입니다. MSG-번호는 화면 문구의 식별 번호입니다.
 
 **13.1 주요 컴포넌트**
 - 소스 분석됨: `Home`, `Login`, `Chat`, `AdminEvalDashboard`, `RequireAuth`, `router`

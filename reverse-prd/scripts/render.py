@@ -436,6 +436,16 @@ def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
   table {{ width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 10pt; }}
   th {{ background: {accent}; color: white; padding: 8px 12px; text-align: left; }}
   td {{ border: 1px solid #dde3e9; padding: 7px 12px; vertical-align: top; }}
+  /* 가독성(실사용 리뷰): 한글이 단어 중간에서 꺾이던 것(예: "의존/성")을 어절 단위로,
+     표 행이 페이지 경계에서 잘리던 것을 행 단위 통째 이동으로 고친다. 긴 경로/코드는
+     어절 규칙으로 못 꺾이면 넘치므로 overflow-wrap으로 마지막에 강제 줄바꿈한다(anywhere는
+     열 최소폭까지 줄여 ID가 `US-/1`처럼 쪼개져서 break-word를 쓴다). */
+  td, th {{ word-break: keep-all; overflow-wrap: break-word; }}
+  tr {{ break-inside: avoid; page-break-inside: avoid; }}
+  thead {{ display: table-header-group; }}
+  h2, h3 {{ break-after: avoid; page-break-after: avoid; }}
+  blockquote, pre, .toc {{ break-inside: avoid; page-break-inside: avoid; }}
+  code {{ overflow-wrap: break-word; }}
   tr:nth-child(even) td {{ background: #f5f7fa; }}
   code {{ background: #eef2f7; padding: 2px 5px; border-radius: 3px; font-size: 9.5pt; }}
   pre {{ background: #1e1e1e; color: #d4d4d4; padding: 14px; border-radius: 6px;
@@ -443,6 +453,10 @@ def build_html(md_text: str, title: str, accent: str, lang: str = "ko") -> str:
   pre code {{ background: transparent; color: inherit; padding: 0; }}
   blockquote {{ border-left: 4px solid #c47a00; background:#fff8ec; margin:16px 0;
                padding:8px 16px; color:#7a5200; }}
+  /* 각 장 첫머리 안내문(h2 바로 다음 인용)은 경고 박스와 구분되는 차분한 스타일 —
+     둘 다 주황색이면 "안내"와 "주의"가 한눈에 안 갈린다. */
+  h2 + blockquote {{ border-left: 4px solid #b8cfe8; background: #f4f6f8; color: #41505c;
+                     font-size: 10pt; padding: 6px 14px; margin: 10px 0 16px; }}
   /* 자동 목차 ([TOC] 마커는 render.py가 본문에 직접 삽입 — build_html 참조) */
   .toc {{ background: #f4f6f8; border: 1px solid #dde3e9; border-radius: 8px;
           padding: 14px 22px; margin: 0 0 20px; }}

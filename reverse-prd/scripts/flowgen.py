@@ -44,7 +44,33 @@ GUARD_STYLE = {
 }
 
 
-def layout(nodes: list, edges: list, entries: list) -> dict:
+def _tw(text: str, size: float) -> float:
+    """글자 폭 근사(외부 폰트 측정 없이 결정적으로): 한글/이모지는 전각, 그 외는 반각급."""
+    return sum(size if ord(c) > 0x2E80 else size * 0.58 for c in text)
+
+
+def _wrap(text: str, size: float, max_w: float) -> list:
+    """렌더링 검증 발견(PDF를 실제로 보고 확인): 간선 라벨이 노드 사이 간격보다 길면
+    뒤에 그려지는 노드 박스에 가려져 글자가 잘렸다 — 라벨을 max_w 안에서 줄바꿈한다."""
+    lines, cur = [], ""
+    for ch in text:
+        if cur and _tw(cur + ch, size) > max_w:
+            # 공백이 있으면 거기서 끊는다
+            cut = cur.rfind(" ")
+            if cut > 0:
+                lines.append(cur[:cut])
+                cur = cur[cut + 1:] + ch
+                continue
+            lines.append(cur)
+            cur = ch
+        else:
+            cur += ch
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def layout(nodes: list, edges: list, entries: list, gap_x: float = GAP_X) -> dict:
     """진입점부터 최장 경로 깊이 = 컬럼. 컬럼 내 순서는 JSON 정의 순서."""
     ids = [n["id"] for n in nodes]
     out_edges = {}
@@ -68,27 +94,34 @@ def layout(nodes: list, edges: list, entries: list) -> dict:
                     changed = True
         if not changed:
             break
-    # 렌더링 검증 발견: 어떤 진입점으로도 도달 불가능한 고립 노드(외부와 끊긴
-    # 사이클 등)를 depth 0으로 두면 실제 진입 화면과 같은 컬럼에 섞여, '섬'인데
-    # 진입점처럼 보였다. 도달 못한 노드는 별도의 뒤쪽 컬럼(detached)에 모은다.
-    reached_max = max(depth.values()) if depth else 0
-    unreached = [i for i in ids if i not in depth]
-    for offset, i in enumerate(unreached):
-        depth[i] = reached_max + 2 + offset  # 진입 흐름과 한 컬럼 이상 띄워 분리
+    # 렌더링 검증 발견: 어떤 진입점으로도 도달 불가능한 고립 노드는 진입 흐름과 섞이면
+    # '섬'인데 진입점처럼 보인다. 이전에는 흐름 오른쪽 먼 컬럼에 띄웠는데, 그러면 빈
+    # 공간 때문에 전체 그림이 쪼그라들어 글자가 못 읽을 만큼 작아졌다(PDF로 확인) —
+    # 이제 흐름 아래 별도 줄에 모아 폭을 줄인다.
+    detached = [i for i in ids if i not in depth]
 
     cols = {}
     for n in nodes:  # JSON 순서 유지 → 결정적
-        cols.setdefault(depth[n["id"]], []).append(n["id"])
+        if n["id"] in depth:
+            cols.setdefault(depth[n["id"]], []).append(n["id"])
 
     pos = {}
+    step_x = NODE_W + gap_x
     for c, members in cols.items():
         for r, nid in enumerate(members):
-            x = PAD + c * (NODE_W + GAP_X)
-            y = PAD + r * (NODE_H + GAP_Y)
-            pos[nid] = (x, y)
-    width = PAD * 2 + (max(cols) + 1) * (NODE_W + GAP_X) - GAP_X
-    height = PAD * 2 + max(len(m) for m in cols.values()) * (NODE_H + GAP_Y) - GAP_Y
-    return {"pos": pos, "width": width, "height": height}
+            pos[nid] = (PAD + c * step_x, PAD + r * (NODE_H + GAP_Y))
+    main_cols = max(cols) + 1 if cols else 1
+    main_rows = max((len(m) for m in cols.values()), default=1)
+    width = PAD * 2 + main_cols * step_x - gap_x
+    height = PAD * 2 + main_rows * (NODE_H + GAP_Y) - GAP_Y
+    detached_y = None
+    if detached:
+        detached_y = height + 8 - PAD + 22          # 캡션 자리 22px
+        for k, nid in enumerate(detached):
+            pos[nid] = (PAD + k * step_x, detached_y)
+        width = max(width, PAD * 2 + len(detached) * step_x - gap_x)
+        height = detached_y + NODE_H + PAD
+    return {"pos": pos, "width": int(width), "height": int(height), "detached_y": detached_y}
 
 
 def esc(s: str) -> str:
@@ -105,7 +138,11 @@ def build_svg(data: dict) -> str:
         kept_ids = {n["id"] for n in nodes[:MAX_NODES]}
         nodes = nodes[:MAX_NODES]
         edges = [e for e in edges if e["from"] in kept_ids and e["to"] in kept_ids]
-    lay = layout(nodes, edges, data.get("entry", []))
+    # 간선 라벨은 노드 사이 간격 안에서 줄바꿈하고, 간격은 가장 긴 줄에 맞춰 넓힌다.
+    wrapped = {id(e): _wrap(e["label"], 11, 120) for e in edges if e.get("label")}
+    longest = max((_tw(l, 11) for ls in wrapped.values() for l in ls), default=0)
+    gap_x = int(min(max(GAP_X, longest + 28), 160))
+    lay = layout(nodes, edges, data.get("entry", []), gap_x)
     pos = lay["pos"]
 
     # 엣지 지오메트리를 먼저 계산해 역방향(복귀) 우회 경로가 실제로 필요로 하는
@@ -144,10 +181,13 @@ def build_svg(data: dict) -> str:
             f'<path d="{path}" fill="none" stroke="#5a6672" '
             f'stroke-width="1.6" marker-end="url(#arrow)"{dash}/>')
         if e.get("label"):
-            edge_parts.append(f'<text x="{lx}" y="{ly}" font-size="11" fill="#41505c" '
-                              f'text-anchor="middle">{esc(e["label"])}</text>')
+            lines = wrapped[id(e)]
+            for k, line in enumerate(lines):
+                yy = ly - (len(lines) - 1 - k) * 13
+                edge_parts.append(f'<text x="{lx}" y="{yy}" font-size="11" fill="#41505c" '
+                                  f'text-anchor="middle">{esc(line)}</text>')
 
-    height = max_y_needed
+    height = int(max_y_needed + 0.999)
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {lay["width"]} {height}" '
         f'width="100%" style="max-width:{lay["width"]}px;font-family:\'Noto Sans KR\',sans-serif;">',
@@ -164,16 +204,23 @@ def build_svg(data: dict) -> str:
         parts.append(f'<rect x="{x}" y="{y}" width="{NODE_W}" height="{NODE_H}" rx="8" '
                      f'fill="{st["fill"]}" stroke="{st["stroke"]}" stroke-width="1.6"/>')
         label = esc(n["label"])
+        fs = 12.5
+        w = _tw(n["label"], fs)
+        if w > NODE_W - 16:                      # 긴 노드명은 글자 크기를 줄여 박스 안에 맞춘다
+            fs = max(9, round(fs * (NODE_W - 16) / w, 1))
         cy = y + NODE_H / 2
         if st["badge"]:
-            parts.append(f'<text x="{x + NODE_W / 2}" y="{cy - 3}" font-size="12.5" '
+            parts.append(f'<text x="{x + NODE_W / 2}" y="{cy - 3}" font-size="{fs}" '
                          f'font-weight="bold" fill="#22303c" text-anchor="middle">{label}</text>')
             parts.append(f'<text x="{x + NODE_W / 2}" y="{cy + 14}" font-size="10" '
                          f'fill="{st["stroke"]}" text-anchor="middle">{esc(st["badge"])}</text>')
         else:
-            parts.append(f'<text x="{x + NODE_W / 2}" y="{cy + 4}" font-size="12.5" '
+            parts.append(f'<text x="{x + NODE_W / 2}" y="{cy + 4}" font-size="{fs}" '
                          f'font-weight="bold" fill="#22303c" text-anchor="middle">{label}</text>')
 
+    if lay.get("detached_y") is not None:
+        parts.append(f'<text x="{PAD}" y="{lay["detached_y"] - 8}" font-size="10" fill="#8a97a3">'
+                     f'코드에서 다른 화면과의 전환이 확인되지 않은 화면</text>')
     parts.append("</svg>")
     return "\n".join(parts)
 
