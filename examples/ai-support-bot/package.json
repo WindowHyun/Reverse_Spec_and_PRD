@@ -1,0 +1,15 @@
+{
+  "name": "ai-support-bot",
+  "version": "0.1.0",
+  "description": "AI 고객지원 챗봇 — 로그인 사용자가 OpenAI 기반 상담 챗봇과 대화하고, 관리자는 응답 품질 eval 리포트를 확인한다",
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-router-dom": "^6.22.0",
+    "openai": "^4.47.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@langchain/core": "^0.2.0",
+    "typescript": "^5.4.0"
+  }
+}

@@ -215,23 +215,28 @@ PDF는 공유/인쇄용. `--format docx,html`을 지정하면 PDF 대신 Word로
 ├── docs/
 │   └── skill-mcp-review.md  # 공식 문서 기반 Skill/MCP 준수 리뷰
 ├── tools/
-│   └── check-sync.sh        # 공유 파일 사본 일치 검증 스크립트
+│   └── check-sync.sh        # 공유 파일 사본 일치 검증 스크립트 (CI에서도 실행)
+├── .github/workflows/
+│   └── check-sync.yml       # CI: push/PR마다 공유 파일 동기화 + py_compile 검증
 └── examples/
     ├── mock-shop/           # 데모용 목 e-커머스 앱 (React Router)
+    ├── ai-support-bot/      # 데모용 AI 챗봇 앱 (openai SDK) — AI/LLM 감지(1-K) 검증용
+    ├── ai-support-bot-output/ # 위 앱의 PRD (사실 표, 흐름, 본문 md, PDF+HTML 샘플)
     ├── reverse-prd-output/  # mock-shop PRD 샘플 (PDF+HTML 쌍, 본문 md, flow JSON/SVG)
     ├── review-output/       # 리뷰 리포트 PDF+HTML 쌍
     └── hybrid-demo/         # 하이브리드 추출 개념 증명 (결정성 데모)
 ```
 
-> `reference.md`와 `scripts/render.py`는 두 스킬에서 **동일 사본**으로 유지된다(스킬은
-> `${CLAUDE_SKILL_DIR}`로 자기 디렉토리 내부 파일만 참조하므로). 한쪽 수정 시 다른 쪽에도
-> 복사하고, 커밋 전 `bash tools/check-sync.sh` 로 일치 여부를 검증한다.
+> `reference.md`와 `scripts/{extract,render,flowgen}.py`는 두 스킬에서 **동일 사본**으로
+> 유지된다(스킬은 `${CLAUDE_SKILL_DIR}`로 자기 디렉토리 내부 파일만 참조하므로). 한쪽 수정 시
+> 다른 쪽에도 복사하고 `bash tools/check-sync.sh`로 검증한다 — CI도 push/PR마다 같은 검사를
+> 돌린다. (`SKILL.md`는 의도적으로 서로 다른 문서라 동기화 대상이 아니다.)
 
 ---
 
 ## 현재 검증 상태
 
-`extract.py`의 결정성은 동봉된 mock-shop 예제(해시 검증)에서만 증명되었다. 정규식
+`extract.py`의 결정성은 동봉된 예제(mock-shop, ai-support-bot — 해시 검증)에서만 증명되었다. 정규식
 기반이라 Next.js/Nuxt 파일 기반 라우팅, Vue `<script setup>`, CSS-in-JS, 비표준 상태관리
 패턴은 놓칠 수 있다 — `reference.md` 1-I의 "추출 통계가 비정상적으로 낮을 때" 경고 절차
 참조. 대형 코드베이스 분할 모드는 절차로만 작성되었고 실제 30개 초과 프로젝트에서
@@ -241,4 +246,4 @@ PDF는 공유/인쇄용. `--format docx,html`을 지정하면 PDF 대신 Word로
 ## 참고
 
 - 공식 문서 기반 준수 리뷰: [`docs/skill-mcp-review.md`](docs/skill-mcp-review.md)
-- 샘플 출력 미리보기: `examples/reverse-prd-output/reverse_prd_mock-shop_sample.html`
+- 샘플 출력 미리보기: `examples/reverse-prd-output/reverse_prd_mock-shop_sample.html`, `examples/ai-support-bot-output/reverse_prd_ai-support-bot_sample.html` (AI 연동 예제: 표지·자동 목차·상태 배지)
