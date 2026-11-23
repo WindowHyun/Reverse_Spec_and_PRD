@@ -2,7 +2,7 @@
 
 > 대상: `reverse-spec/SKILL.md`, `reverse-prd/SKILL.md`
 > 기준 문서(공식): `code.claude.com/docs/en/skills.md`, `.../commands.md`, `.../mcp.md`
-> 작성일: 2026-06-23 · **최신화: 2026-10-08** (13장에 extract.py/render.py 보안·정확성
+> 작성일: 2026-06-23 · **최신화: 2026-11-23** (13장에 extract.py/render.py 보안·정확성·AI PRD·디자인
 > 하드닝 라운드 전체 반영 — 최초 8장 갱신(2026-07-02) 이후 날짜가 갈아끼워지지 않고
 > 방치됐던 것을 자체 재검토로 발견해 바로잡음)
 

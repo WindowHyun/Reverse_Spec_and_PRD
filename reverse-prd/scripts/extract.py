@@ -3,7 +3,7 @@
 """
 결정적 코드 사실 추출기 (reverse-spec / reverse-prd 공용).
 
-reference.md의 1-A~1-H 추출 규칙을 파서(정규식)로 구현한다. LLM 없이 동작하며,
+reference.md의 1-A~1-K 추출 규칙을 파서(정규식)로 구현한다. LLM 없이 동작하며,
 같은 입력 → 항상 같은 출력 (모든 목록 정렬, 실행 시각 미포함 — 스냅샷은 커밋 시각 사용).
 
 역할 분담(하이브리드):
@@ -1624,7 +1624,7 @@ def build_flow_skeleton(routes, trans, comps) -> dict:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="결정적 코드 사실 추출기 (1-A~1-H)")
+    ap = argparse.ArgumentParser(description="결정적 코드 사실 추출기 (1-A~1-K)")
     ap.add_argument("target", help="분석 대상 디렉토리 또는 파일")
     ap.add_argument("--output", help="사실 표 Markdown 출력 경로 (생략 시 stdout)")
     ap.add_argument("--emit-flow", help="flowgen용 흐름 스켈레톤 JSON 출력 경로")

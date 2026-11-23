@@ -220,24 +220,30 @@ Static analysis is honest about its limits:
 ├── docs/
 │   └── skill-mcp-review.md  # official-docs-based Skill/MCP compliance review
 ├── tools/
-│   └── check-sync.sh        # verifies the shared-file copies are identical
+│   └── check-sync.sh        # verifies the shared-file copies are identical (also run in CI)
+├── .github/workflows/
+│   └── check-sync.yml       # CI: shared-file sync + py_compile on every push/PR
 └── examples/
     ├── mock-shop/           # demo mock e-commerce app (React Router)
+    ├── ai-support-bot/      # demo AI chatbot app (openai SDK) — exercises AI/LLM detection (1-K)
+    ├── ai-support-bot-output/ # its PRD: facts, flow, body md, PDF+HTML sample
     ├── reverse-prd-output/  # sample PRD from mock-shop (PDF+HTML pair, body md, flow JSON/SVG)
     ├── review-output/       # this review report rendered as a PDF+HTML pair
     └── hybrid-demo/         # hybrid-extraction proof of concept (determinism demo)
 ```
 
-> `reference.md` and `scripts/render.py` are kept as **identical copies** in both skills (a
-> skill can only reference files inside its own directory via `${CLAUDE_SKILL_DIR}`). Edit one,
-> copy to the other, then verify with `bash tools/check-sync.sh` before committing.
+> `reference.md` and `scripts/{extract,render,flowgen}.py` are kept as **identical copies** in
+> both skills (a skill can only reference files inside its own directory via
+> `${CLAUDE_SKILL_DIR}`). Edit one, copy to the other, then verify with
+> `bash tools/check-sync.sh` — CI runs the same check on every push/PR. (`SKILL.md` files are
+> intentionally different and not synced.)
 
 ---
 
 ## Current validation status
 
-`extract.py`'s determinism is proven only on the bundled mock-shop example (hash-verified
-across runs). It's regex-based, so file-based routing (Next.js/Nuxt), Vue `<script setup>`,
+`extract.py`'s determinism is proven only on the bundled examples (mock-shop and ai-support-bot,
+hash-verified across runs). It's regex-based, so file-based routing (Next.js/Nuxt), Vue `<script setup>`,
 CSS-in-JS, and non-standard state patterns may be missed — see `reference.md` §1-I for the
 built-in low-fact-count warning. The large-codebase split mode is written as a procedure but
 hasn't been exercised on a real 30+ file project yet. Try it on your own codebase and sanity-check
@@ -246,4 +252,4 @@ the extraction stats before relying on it for anything beyond a first draft.
 ## See also
 
 - Official-docs-based compliance review: [`docs/skill-mcp-review.md`](docs/skill-mcp-review.md)
-- Sample output preview: `examples/reverse-prd-output/reverse_prd_mock-shop_sample.html`
+- Sample output previews: `examples/reverse-prd-output/reverse_prd_mock-shop_sample.html`, `examples/ai-support-bot-output/reverse_prd_ai-support-bot_sample.html` (AI-integration example: cover, auto TOC, status badges)
